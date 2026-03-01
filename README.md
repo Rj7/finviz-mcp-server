@@ -156,6 +156,44 @@ If you prefer to use a `.env` file (recommended for security):
 
 Make sure your `.env` file contains all required environment variables.
 
+### Docker
+
+Build and run the server in a Docker container with SSE transport:
+
+```bash
+# Build the image
+docker build -t finviz-mcp-server .
+
+# Run with SSE transport
+docker run -d -p 8000:8000 \
+  -e MCP_TRANSPORT=sse \
+  -e MCP_HOST=0.0.0.0 \
+  -e MCP_PORT=8000 \
+  -e FINVIZ_API_KEY=your_key \
+  finviz-mcp-server
+```
+
+Or with Docker Compose:
+
+```yaml
+services:
+  finviz-mcp:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - MCP_TRANSPORT=sse
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8000
+      - FINVIZ_API_KEY=${FINVIZ_API_KEY}
+    restart: unless-stopped
+```
+
+**Environment Variables for Docker:**
+- `MCP_TRANSPORT`: Transport mode (`stdio`, `sse`, or `streamable-http`)
+- `MCP_HOST`: Host to bind to (use `0.0.0.0` for Docker)
+- `MCP_PORT`: Port to listen on (default: `8000`)
+
 ### MCP Tools
 
 #### Earnings Screener

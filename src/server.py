@@ -22,8 +22,14 @@ from .field_discovery.tools import register_field_discovery_tools
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize MCP Server
-server = FastMCP("Finviz MCP Server")
+# Initialize MCP Server with configurable host/port for Docker SSE transport
+_mcp_host = os.getenv("MCP_HOST", "127.0.0.1")
+_mcp_port = int(os.getenv("MCP_PORT", "8000"))
+server = FastMCP(
+    "Finviz MCP Server",
+    host=_mcp_host,
+    port=_mcp_port
+)
 
 # Initialize Finviz clients
 finviz_api_key = os.getenv('FINVIZ_API_KEY')
@@ -1982,8 +1988,17 @@ def technical_analysis_screener(
         return [TextContent(type="text", text=f"Error: {str(e)}")]
 
 def cli_main():
-    """CLI entry point"""
-    server.run()
+    """CLI entry point - supports stdio (default) and sse transport for Docker"""
+    transport = os.getenv("MCP_TRANSPORT", "stdio")
+    
+    if transport in ("sse", "streamable-http"):
+        # SSE/HTTP transport for Docker mode
+        # Host and port are set in FastMCP constructor via env vars
+        logger.info(f"Starting MCP server with {transport} transport on {_mcp_host}:{_mcp_port}")
+        server.run(transport=transport)
+    else:
+        # Default stdio transport for Claude Desktop
+        server.run()
 
 @server.tool()
 def earnings_winners_screener(
