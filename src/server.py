@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Union
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent
 
-from .utils.validators import validate_ticker, validate_tickers, parse_tickers, validate_market_cap, validate_earnings_date, validate_price_range, validate_sector, validate_volume, validate_screening_params, validate_data_fields
+from .utils.validators import validate_ticker, validate_tickers, parse_tickers, validate_market_cap, validate_earnings_date, validate_price_range, validate_sector, validate_volume, validate_screening_params, validate_data_fields, validate_and_normalize_raw_filters, validate_raw_sort_order, validate_signal
 from .utils.formatters import format_large_number
 from .finviz_client.base import FinvizClient
 from .finviz_client.screener import FinvizScreener
@@ -3710,3 +3710,133 @@ def get_moving_average_position(ticker: str) -> List[TextContent]:
     ]
 
     return [TextContent(type="text", text="\n".join(lines))]
+
+
+# ---------------------------------------------------------------------------
+# Custom Screener Tool
+# ---------------------------------------------------------------------------
+
+
+@server.tool()
+def custom_screener(
+    filters: str,
+    signal: Optional[str] = None,
+    order: Optional[str] = None,
+    max_results: int = 50,
+) -> List[TextContent]:
+    """Screen stocks using raw FinViz filter codes for maximum flexibility.
+
+    Unlike the preset screener tools, this accepts raw FinViz filter tokens
+    directly so you can combine any filters that FinViz supports.
+
+    Args:
+        filters: Comma-separated raw FinViz filter codes.
+            Examples:
+              "cap_large,fa_div_o3"              - Large cap, dividend > 3%
+              "cap_small,fa_pe_u20"              - Small cap, P/E < 20
+              "cap_mega,fa_roe_o20,fa_pb_u3"     - Mega cap, ROE > 20%, P/B < 3
+              "sec_technology,fa_salesqoq_o25"    - Tech sector, quarterly sales growth > 25%
+              "earningsdate_yesterdayafter|todaybefore" - Earnings yesterday after-close through today before-open
+            Common filter prefixes:
+              cap_  : Market cap (nano/micro/small/mid/large/mega)
+              fa_   : Fundamental analysis (pe, div, roe, eps, etc.)
+              ta_   : Technical analysis (sma, rsi, pattern, etc.)
+              sec_  : Sector
+              ind_  : Industry
+              geo_  : Country
+              sh_   : Share data (price, avgvol, float, etc.)
+        signal: Optional FinViz signal identifier (e.g. "ta_topgainers",
+            "ta_mostactive", "ta_unusualvolume", "ta_oversold").
+        order: Optional sort order. Use a column name for ascending or prefix
+            with '-' for descending (e.g. "-marketcap", "change", "-volume").
+        max_results: Maximum number of results to return (1-500, default 50).
+
+    Returns:
+        List of TextContent with formatted screening results.
+    """
+    try:
+        # --- Validate filters ---
+        filter_errors, normalized_filters = validate_and_normalize_raw_filters(filters)
+        if filter_errors:
+            return [TextContent(type="text", text=f"Filter validation error: {'; '.join(filter_errors)}")]
+
+        # --- Validate optional signal ---
+        if signal is not None:
+            signal_errors = validate_signal(signal)
+            if signal_errors:
+                return [TextContent(type="text", text=f"Signal validation error: {'; '.join(signal_errors)}")]
+
+        # --- Validate optional order ---
+        if order is not None:
+            order_errors = validate_raw_sort_order(order)
+            if order_errors:
+                return [TextContent(type="text", text=f"Order validation error: {'; '.join(order_errors)}")]
+
+        # --- Clamp max_results ---
+        if not isinstance(max_results, int) or max_results < 1:
+            max_results = 50
+        max_results = min(max_results, 500)
+
+        # --- Execute screening ---
+        stocks = finviz_client.screen_stocks_raw(
+            filters=normalized_filters,
+            signal=signal,
+            order=order,
+            max_results=max_results,
+        )
+
+        if not stocks:
+            return [TextContent(type="text", text=f"No stocks found matching filters: {normalized_filters}")]
+
+        # --- Format output ---
+        lines = []
+        lines.append(f"Custom Screener Results ({len(stocks)} stocks)")
+        lines.append("=" * 60)
+        lines.append(f"Filters: {normalized_filters}")
+        if signal:
+            lines.append(f"Signal : {signal}")
+        if order:
+            lines.append(f"Order  : {order}")
+        lines.append("")
+
+        for stock in stocks:
+            ticker = getattr(stock, 'ticker', 'N/A')
+            company = getattr(stock, 'company', 'N/A')
+            sector = getattr(stock, 'sector', 'N/A')
+            industry = getattr(stock, 'industry', 'N/A')
+            price = getattr(stock, 'price', None)
+            change = getattr(stock, 'change', None)
+            volume = getattr(stock, 'volume', None)
+            market_cap = getattr(stock, 'market_cap', None)
+            pe = getattr(stock, 'pe', None)
+            rel_volume = getattr(stock, 'relative_volume', None)
+            dividend_yield = getattr(stock, 'dividend_yield', None)
+            eps_surprise = getattr(stock, 'eps_surprise', None)
+
+            price_str = f"${price:.2f}" if price is not None else "N/A"
+            change_str = f"{change:+.2f}%" if change is not None else "N/A"
+            vol_str = format_large_number(volume) if volume is not None else "N/A"
+            mcap_str = format_large_number(market_cap) if market_cap is not None else "N/A"
+            pe_str = f"{pe:.1f}" if pe is not None else "N/A"
+            rv_str = f"{rel_volume:.2f}" if rel_volume is not None else "N/A"
+
+            lines.append(f"{ticker} | {company}")
+            lines.append(f"  Sector: {sector} | Industry: {industry}")
+            lines.append(f"  Price: {price_str} | Change: {change_str} | Volume: {vol_str}")
+            lines.append(f"  Market Cap: {mcap_str} | P/E: {pe_str} | Rel Volume: {rv_str}")
+
+            extras = []
+            if dividend_yield is not None:
+                extras.append(f"Div Yield: {dividend_yield:.2f}%")
+            if eps_surprise is not None:
+                extras.append(f"EPS Surprise: {eps_surprise:+.2f}%")
+            if extras:
+                lines.append(f"  {' | '.join(extras)}")
+
+            lines.append("")
+
+        return [TextContent(type="text", text="\n".join(lines))]
+
+    except Exception as e:
+        logger.error(f"Error in custom_screener: {str(e)}")
+        return [TextContent(type="text", text=f"Error: {str(e)}")]

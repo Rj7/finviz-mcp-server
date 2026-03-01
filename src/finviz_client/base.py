@@ -316,6 +316,71 @@ class FinvizClient:
             logger.error(f"Error in stock screening: {e}")
             return []
     
+    def screen_stocks_raw(
+        self,
+        filters: str,
+        signal: Optional[str] = None,
+        order: Optional[str] = None,
+        max_results: Optional[int] = None,
+    ) -> List[StockData]:
+        """
+        Screen stocks using raw FinViz filter codes, bypassing _convert_filters_to_finviz().
+
+        Args:
+            filters: Pre-validated, normalized comma-separated FinViz filter string
+                     (e.g. "cap_small,fa_div_o3,fa_pe_u20").
+            signal: Optional FinViz signal (e.g. "ta_topgainers").
+            order: Optional sort order (e.g. "-marketcap" for descending market cap).
+            max_results: Maximum number of results (1-500). None means no limit.
+
+        Returns:
+            List of StockData objects.
+        """
+        try:
+            all_columns = ','.join(str(i) for i in range(129))
+            params = {
+                'v': '151',
+                'f': filters,
+                'c': all_columns,
+            }
+
+            if signal:
+                params['s'] = signal
+            if order:
+                params['o'] = order
+
+            # Server-side result limit
+            effective_max = None
+            if max_results is not None:
+                effective_max = max(1, min(max_results, 500))
+                params['ar'] = str(effective_max)
+
+            df = self._fetch_csv_from_url(self.EXPORT_URL, params)
+
+            if df.empty:
+                logger.warning("No data returned from raw CSV export")
+                return []
+
+            # Client-side limit as fallback
+            if effective_max is not None and len(df) > effective_max:
+                df = df.head(effective_max)
+
+            stocks = []
+            for _, row in df.iterrows():
+                try:
+                    stock_data = self._parse_stock_data_from_csv(row)
+                    stocks.append(stock_data)
+                except Exception as e:
+                    logger.warning(f"Failed to parse stock data from raw CSV row: {e}")
+                    continue
+
+            logger.info(f"Successfully screened {len(stocks)} stocks using raw filters")
+            return stocks
+
+        except Exception as e:
+            logger.error(f"Error in raw stock screening: {e}")
+            return []
+
     def _convert_filters_to_finviz(self, filters: Dict[str, Any]) -> Dict[str, str]:
         """
         内部フィルタ形式をFinviz URLパラメータに変換（強化版）

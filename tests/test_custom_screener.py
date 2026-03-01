@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""
+Unit tests for the custom_screener tool and its supporting validation /
+client functions.
+"""
+
+import pytest
+import pandas as pd
+from unittest.mock import patch, MagicMock
+
+from src.utils.validators import (
+    validate_and_normalize_raw_filters,
+    validate_raw_sort_order,
+    validate_signal,
+)
+from src.finviz_client.base import FinvizClient
+
+
+# ---------------------------------------------------------------------------
+# validate_and_normalize_raw_filters
+# ---------------------------------------------------------------------------
+
+class TestValidateAndNormalizeRawFilters:
+
+    def test_basic_valid(self):
+        errors, normalized = validate_and_normalize_raw_filters("cap_small,fa_div_o3")
+        assert errors == []
+        assert normalized == "cap_small,fa_div_o3"
+
+    def test_whitespace_normalization(self):
+        errors, normalized = validate_and_normalize_raw_filters("cap_small, fa_div_o3")
+        assert errors == []
+        assert normalized == "cap_small,fa_div_o3"
+
+    def test_extra_whitespace(self):
+        errors, normalized = validate_and_normalize_raw_filters("  cap_small ,  fa_div_o3  ")
+        assert errors == []
+        assert normalized == "cap_small,fa_div_o3"
+
+    def test_pipe_allowed(self):
+        errors, normalized = validate_and_normalize_raw_filters(
+            "earningsdate_yesterdayafter|todaybefore"
+        )
+        assert errors == []
+        assert normalized == "earningsdate_yesterdayafter|todaybefore"
+
+    def test_single_token(self):
+        errors, normalized = validate_and_normalize_raw_filters("cap_large")
+        assert errors == []
+        assert normalized == "cap_large"
+
+    def test_dots_and_hyphens(self):
+        errors, normalized = validate_and_normalize_raw_filters("ta_sma20-50.cross")
+        assert errors == []
+        assert normalized == "ta_sma20-50.cross"
+
+    def test_injection_rejected(self):
+        errors, _ = validate_and_normalize_raw_filters("<script>alert(1)</script>")
+        assert len(errors) > 0
+
+    def test_sql_injection_rejected(self):
+        errors, _ = validate_and_normalize_raw_filters("cap_small; DROP TABLE stocks")
+        assert len(errors) > 0
+
+    def test_uppercase_rejected(self):
+        errors, _ = validate_and_normalize_raw_filters("CAP_LARGE")
+        assert len(errors) > 0
+
+    def test_empty_string(self):
+        errors, normalized = validate_and_normalize_raw_filters("")
+        assert len(errors) > 0
+        assert normalized == ""
+
+    def test_only_commas(self):
+        errors, normalized = validate_and_normalize_raw_filters(",,,")
+        assert len(errors) > 0
+        assert normalized == ""
+
+    def test_spaces_and_commas(self):
+        errors, normalized = validate_and_normalize_raw_filters(" , , ")
+        assert len(errors) > 0
+        assert normalized == ""
+
+    def test_too_many_tokens(self):
+        tokens = ",".join([f"f{i}" for i in range(31)])
+        errors, _ = validate_and_normalize_raw_filters(tokens)
+        assert len(errors) > 0
+        assert "30" in errors[0]
+
+    def test_exactly_30_tokens(self):
+        tokens = ",".join([f"f{i}" for i in range(30)])
+        errors, normalized = validate_and_normalize_raw_filters(tokens)
+        assert errors == []
+        assert len(normalized.split(",")) == 30
+
+    def test_none_input(self):
+        errors, _ = validate_and_normalize_raw_filters(None)
+        assert len(errors) > 0
+
+    def test_non_string_input(self):
+        errors, _ = validate_and_normalize_raw_filters(123)
+        assert len(errors) > 0
+
+
+# ---------------------------------------------------------------------------
+# validate_raw_sort_order
+# ---------------------------------------------------------------------------
+
+class TestValidateRawSortOrder:
+
+    def test_ascending(self):
+        assert validate_raw_sort_order("marketcap") == []
+
+    def test_descending(self):
+        assert validate_raw_sort_order("-marketcap") == []
+
+    def test_with_underscore(self):
+        assert validate_raw_sort_order("-eps_surprise") == []
+
+    def test_invalid_chars(self):
+        errors = validate_raw_sort_order("market cap")
+        assert len(errors) > 0
+
+    def test_empty(self):
+        errors = validate_raw_sort_order("")
+        assert len(errors) > 0
+
+    def test_none(self):
+        errors = validate_raw_sort_order(None)
+        assert len(errors) > 0
+
+    def test_uppercase_rejected(self):
+        errors = validate_raw_sort_order("-MarketCap")
+        assert len(errors) > 0
+
+
+# ---------------------------------------------------------------------------
+# validate_signal
+# ---------------------------------------------------------------------------
+
+class TestValidateSignal:
+
+    def test_valid(self):
+        assert validate_signal("ta_topgainers") == []
+
+    def test_valid_simple(self):
+        assert validate_signal("ta_oversold") == []
+
+    def test_invalid_with_hyphen(self):
+        errors = validate_signal("ta-topgainers")
+        assert len(errors) > 0
+
+    def test_invalid_with_special_chars(self):
+        errors = validate_signal("ta_top;gainers")
+        assert len(errors) > 0
+
+    def test_empty(self):
+        errors = validate_signal("")
+        assert len(errors) > 0
+
+    def test_none(self):
+        errors = validate_signal(None)
+        assert len(errors) > 0
+
+
+# ---------------------------------------------------------------------------
+# screen_stocks_raw — max_results double-limit
+# ---------------------------------------------------------------------------
+
+class TestScreenStocksRaw:
+
+    def test_max_results_applies_head(self):
+        """Verify that screen_stocks_raw applies df.head() with clamped max_results."""
+        client = FinvizClient(api_key="test_key")
+
+        # Build a fake DataFrame with 100 rows
+        fake_df = pd.DataFrame({
+            "Ticker": [f"T{i}" for i in range(100)],
+            "Company": [f"Company {i}" for i in range(100)],
+            "Sector": ["Technology"] * 100,
+            "Industry": ["Software"] * 100,
+            "Country": ["USA"] * 100,
+            "Market Cap": [1000000000] * 100,
+            "P/E": [20.0] * 100,
+            "Price": [100.0] * 100,
+            "Change": [1.0] * 100,
+            "Volume": [500000] * 100,
+        })
+
+        with patch.object(client, "_fetch_csv_from_url", return_value=fake_df) as mock_fetch:
+            results = client.screen_stocks_raw(
+                filters="cap_large",
+                max_results=10,
+            )
+            mock_fetch.assert_called_once()
+            # Should return at most 10 stocks
+            assert len(results) <= 10
+
+    def test_max_results_clamped_to_500(self):
+        """Verify max_results > 500 is clamped."""
+        client = FinvizClient(api_key="test_key")
+        fake_df = pd.DataFrame({
+            "Ticker": ["AAPL"],
+            "Company": ["Apple"],
+            "Sector": ["Technology"],
+            "Industry": ["Consumer Electronics"],
+            "Country": ["USA"],
+            "Market Cap": [3000000000000],
+            "P/E": [30.0],
+            "Price": [200.0],
+            "Change": [0.5],
+            "Volume": [80000000],
+        })
+
+        with patch.object(client, "_fetch_csv_from_url", return_value=fake_df) as mock_fetch:
+            client.screen_stocks_raw(filters="cap_mega", max_results=9999)
+            call_params = mock_fetch.call_args[0][1]
+            # ar parameter should be clamped to 500
+            assert call_params["ar"] == "500"
+
+    def test_max_results_zero_clamped_to_1(self):
+        """Verify max_results=0 is clamped to 1."""
+        client = FinvizClient(api_key="test_key")
+        fake_df = pd.DataFrame({
+            "Ticker": ["AAPL"],
+            "Company": ["Apple"],
+            "Sector": ["Technology"],
+            "Industry": ["Consumer Electronics"],
+            "Country": ["USA"],
+            "Market Cap": [3000000000000],
+            "P/E": [30.0],
+            "Price": [200.0],
+            "Change": [0.5],
+            "Volume": [80000000],
+        })
+
+        with patch.object(client, "_fetch_csv_from_url", return_value=fake_df) as mock_fetch:
+            client.screen_stocks_raw(filters="cap_mega", max_results=0)
+            call_params = mock_fetch.call_args[0][1]
+            assert call_params["ar"] == "1"
+
+    def test_no_max_results(self):
+        """When max_results is None, ar param should not be set."""
+        client = FinvizClient(api_key="test_key")
+        empty_df = pd.DataFrame()
+
+        with patch.object(client, "_fetch_csv_from_url", return_value=empty_df) as mock_fetch:
+            client.screen_stocks_raw(filters="cap_large", max_results=None)
+            call_params = mock_fetch.call_args[0][1]
+            assert "ar" not in call_params
+
+    def test_signal_and_order_params(self):
+        """Verify signal and order are passed correctly."""
+        client = FinvizClient(api_key="test_key")
+        empty_df = pd.DataFrame()
+
+        with patch.object(client, "_fetch_csv_from_url", return_value=empty_df):
+            client.screen_stocks_raw(
+                filters="cap_large",
+                signal="ta_topgainers",
+                order="-marketcap",
+            )
+            call_params = client._fetch_csv_from_url.call_args[0][1]
+            assert call_params["s"] == "ta_topgainers"
+            assert call_params["o"] == "-marketcap"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

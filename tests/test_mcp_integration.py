@@ -80,6 +80,7 @@ class TestMCPServerIntegration:
             "get_relative_volume_stocks",
             "technical_analysis_screener",
             "upcoming_earnings_screener",
+            "custom_screener",
         ]
 
         # Get registered tools from the server

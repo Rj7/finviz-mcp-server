@@ -1,5 +1,5 @@
 import re
-from typing import Optional, List, Any, Dict, Union
+from typing import Optional, List, Any, Dict, Tuple, Union
 from ..constants import ALL_PARAMETERS
 
 def validate_ticker(ticker: str) -> bool:
@@ -697,5 +697,84 @@ def sanitize_input(value: Any) -> Any:
         for char in dangerous_chars:
             value = value.replace(char, '')
         return value.strip()
-    
+
     return value
+
+
+def validate_and_normalize_raw_filters(raw_filters: str) -> Tuple[List[str], str]:
+    """
+    Validate and normalize raw FinViz filter codes.
+
+    Accepts comma-separated filter tokens like "cap_small,fa_div_o3,fa_pe_u20".
+    Whitespace around tokens is stripped. Pipe characters are allowed for
+    compound date filters (e.g. "earningsdate_yesterdayafter|todaybefore").
+
+    Args:
+        raw_filters: Comma-separated raw FinViz filter codes.
+
+    Returns:
+        Tuple of (errors, normalized) where *errors* is a list of validation
+        error strings (empty on success) and *normalized* is the cleaned
+        comma-joined string with whitespace removed.
+    """
+    errors = []  # type: List[str]
+
+    if not raw_filters or not isinstance(raw_filters, str):
+        return (["raw_filters must be a non-empty string"], "")
+
+    tokens = raw_filters.split(",")
+    stripped = [t.strip() for t in tokens]
+    valid_tokens = [t for t in stripped if t]  # drop empty strings
+
+    if not valid_tokens:
+        return (["raw_filters must contain at least one valid filter token"], "")
+
+    if len(valid_tokens) > 30:
+        return ([f"Too many filter tokens ({len(valid_tokens)}). Maximum is 30."], "")
+
+    token_pattern = re.compile(r'^[a-z0-9_.\-|]+$')
+    for token in valid_tokens:
+        if not token_pattern.match(token):
+            errors.append(f"Invalid filter token: '{token}' (only lowercase a-z, 0-9, _, ., -, | allowed)")
+
+    normalized = ",".join(valid_tokens) if not errors else ""
+    return (errors, normalized)
+
+
+def validate_raw_sort_order(order: str) -> List[str]:
+    """
+    Validate a raw FinViz sort order string (e.g. "-marketcap", "change").
+
+    A leading '-' indicates descending order; the rest must be lowercase
+    alphanumeric or underscore.
+
+    Args:
+        order: Sort order string.
+
+    Returns:
+        List of error strings (empty on success).
+    """
+    errors = []  # type: List[str]
+    if not order or not isinstance(order, str):
+        return ["order must be a non-empty string"]
+    if not re.match(r'^-?[a-z0-9_]+$', order):
+        errors.append(f"Invalid sort order: '{order}' (only lowercase a-z, 0-9, _, optional leading '-')")
+    return errors
+
+
+def validate_signal(signal: str) -> List[str]:
+    """
+    Validate a raw FinViz signal string (e.g. "ta_topgainers").
+
+    Args:
+        signal: Signal string.
+
+    Returns:
+        List of error strings (empty on success).
+    """
+    errors = []  # type: List[str]
+    if not signal or not isinstance(signal, str):
+        return ["signal must be a non-empty string"]
+    if not re.match(r'^[a-z0-9_]+$', signal):
+        errors.append(f"Invalid signal: '{signal}' (only lowercase a-z, 0-9, _ allowed)")
+    return errors
