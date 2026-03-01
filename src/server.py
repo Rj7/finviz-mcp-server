@@ -3772,10 +3772,9 @@ def custom_screener(
             if order_errors:
                 return [TextContent(type="text", text=f"Order validation error: {'; '.join(order_errors)}")]
 
-        # --- Clamp max_results ---
-        if not isinstance(max_results, int) or max_results < 1:
-            max_results = 50
-        max_results = min(max_results, 500)
+        # --- Validate max_results ---
+        if not isinstance(max_results, int) or max_results < 1 or max_results > 500:
+            return [TextContent(type="text", text=f"Invalid max_results: {max_results} (must be an integer between 1 and 500)")]
 
         # --- Execute screening ---
         stocks = finviz_client.screen_stocks_raw(
@@ -3801,14 +3800,14 @@ def custom_screener(
 
         for stock in stocks:
             ticker = getattr(stock, 'ticker', 'N/A')
-            company = getattr(stock, 'company', 'N/A')
+            company = getattr(stock, 'company_name', 'N/A')
             sector = getattr(stock, 'sector', 'N/A')
             industry = getattr(stock, 'industry', 'N/A')
             price = getattr(stock, 'price', None)
-            change = getattr(stock, 'change', None)
+            change = getattr(stock, 'price_change', None)
             volume = getattr(stock, 'volume', None)
             market_cap = getattr(stock, 'market_cap', None)
-            pe = getattr(stock, 'pe', None)
+            pe = getattr(stock, 'pe_ratio', None)
             rel_volume = getattr(stock, 'relative_volume', None)
             dividend_yield = getattr(stock, 'dividend_yield', None)
             eps_surprise = getattr(stock, 'eps_surprise', None)

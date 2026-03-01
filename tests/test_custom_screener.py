@@ -265,5 +265,127 @@ class TestScreenStocksRaw:
             assert call_params["o"] == "-marketcap"
 
 
+# ---------------------------------------------------------------------------
+# custom_screener tool — output formatting & integration
+# ---------------------------------------------------------------------------
+
+class TestCustomScreenerTool:
+
+    @pytest.fixture
+    def mock_stock(self):
+        """Build a minimal StockData-like object with correct attribute names."""
+        from src.models import StockData
+        return StockData(
+            ticker="AAPL",
+            company_name="Apple Inc.",
+            sector="Technology",
+            industry="Consumer Electronics",
+            price=195.50,
+            price_change=-1.25,
+            volume=54000000,
+            market_cap=3000000000000,
+            pe_ratio=30.5,
+            relative_volume=1.12,
+            dividend_yield=0.55,
+            eps_surprise=4.20,
+        )
+
+    @pytest.mark.asyncio
+    async def test_output_contains_correct_values(self, mock_stock):
+        """Verify that the formatted output uses correct StockData attributes."""
+        from src.server import server
+        with patch("src.server.finviz_client") as mock_client:
+            mock_client.screen_stocks_raw.return_value = [mock_stock]
+
+            result = await server.call_tool("custom_screener", {
+                "filters": "cap_large,fa_div_o3",
+            })
+
+            text = result[0][0].text
+            # Core values must appear — not "N/A"
+            assert "Apple Inc." in text
+            assert "$195.50" in text
+            assert "-1.25%" in text
+            assert "30.5" in text
+            assert "Div Yield: 0.55%" in text
+            assert "EPS Surprise: +4.20%" in text
+            # Should NOT show N/A for fields we populated
+            # (ticker line and company are on the same line)
+            assert "AAPL | Apple Inc." in text
+
+    @pytest.mark.asyncio
+    async def test_output_no_stocks(self):
+        """When no stocks match, a clear message is returned."""
+        from src.server import server
+        with patch("src.server.finviz_client") as mock_client:
+            mock_client.screen_stocks_raw.return_value = []
+
+            result = await server.call_tool("custom_screener", {
+                "filters": "cap_nano",
+            })
+
+            text = result[0][0].text
+            assert "No stocks found" in text
+
+    @pytest.mark.asyncio
+    async def test_zero_values_not_shown_as_na(self, mock_stock):
+        """Ensure price_change=0 and pe_ratio=0 render as 0, not N/A."""
+        from src.models import StockData
+        from src.server import server
+
+        stock = StockData(
+            ticker="FLAT",
+            company_name="Flat Corp",
+            sector="Industrials",
+            industry="Misc",
+            price=10.0,
+            price_change=0.0,
+            pe_ratio=0.0,
+            volume=100,
+            market_cap=500000,
+        )
+
+        with patch("src.server.finviz_client") as mock_client:
+            mock_client.screen_stocks_raw.return_value = [stock]
+
+            result = await server.call_tool("custom_screener", {
+                "filters": "cap_small",
+            })
+
+            text = result[0][0].text
+            assert "+0.00%" in text       # price_change == 0
+            assert "P/E: 0.0" in text     # pe_ratio == 0
+
+    @pytest.mark.asyncio
+    async def test_invalid_max_results_returns_error(self):
+        """max_results outside 1-500 should return an explicit error."""
+        from src.server import server
+
+        result = await server.call_tool("custom_screener", {
+            "filters": "cap_large",
+            "max_results": 0,
+        })
+        text = result[0][0].text
+        assert "Invalid max_results" in text
+
+        result2 = await server.call_tool("custom_screener", {
+            "filters": "cap_large",
+            "max_results": 501,
+        })
+        text2 = result2[0][0].text
+        assert "Invalid max_results" in text2
+
+    @pytest.mark.asyncio
+    async def test_filter_validation_error(self):
+        """Invalid filter tokens return a clear validation error."""
+        from src.server import server
+
+        result = await server.call_tool("custom_screener", {
+            "filters": "<script>alert(1)</script>",
+        })
+        text = result[0][0].text
+        assert "Filter validation error" in text
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
