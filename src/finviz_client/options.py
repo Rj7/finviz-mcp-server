@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 OPTIONS_EXPORT_URL = f"{FinvizClient.BASE_URL}/export/options"
 
+OPTION_TYPE_PARAMS = {"call": "oc", "put": "op"}
+
 
 class FinvizOptionsClient(FinvizClient):
     """Fetch options chain data from Finviz Elite."""
@@ -29,16 +31,14 @@ class FinvizOptionsClient(FinvizClient):
             ticker: Stock ticker symbol.
             option_type: 'call' or 'put'.
             expiration: Expiration date as YYYY-MM-DD. If omitted, returns
-                        the nearest expiration.
+                        all expirations (can be thousands of contracts).
 
         Returns:
-            List of option contract dicts with keys: contract, last, strike,
-            last_close, bid, ask, change, change_pct, volume, open_interest,
-            type, iv, delta, gamma, theta, vega, rho.
+            List of option contract dicts.
         """
         params: Dict[str, Any] = {
             "t": ticker.upper(),
-            "ty": "oc" if option_type == "call" else "op",
+            "ty": OPTION_TYPE_PARAMS[option_type],
         }
         if expiration:
             params["e"] = expiration
@@ -89,15 +89,14 @@ class FinvizOptionsClient(FinvizClient):
             "Rho": "rho",
         }
 
-        results: List[Dict[str, Any]] = []
-        for _, row in df.iterrows():
-            contract: Dict[str, Any] = {}
-            for csv_col, key in col_map.items():
-                val = row.get(csv_col)
-                if val is not None and str(val).strip() not in ("", "-", "nan"):
-                    contract[key] = val
-                else:
-                    contract[key] = None
-            results.append(contract)
+        # Rename columns present in the DataFrame, drop unmapped ones
+        rename = {csv: key for csv, key in col_map.items() if csv in df.columns}
+        df = df.rename(columns=rename)[list(rename.values())]
 
-        return results
+        # Convert to records and replace NaN with None
+        records = df.to_dict("records")
+        for rec in records:
+            for k, v in rec.items():
+                if pd.isna(v):
+                    rec[k] = None
+        return records

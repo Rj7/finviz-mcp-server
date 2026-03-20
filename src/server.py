@@ -3858,8 +3858,8 @@ def get_options_chain(
     Args:
         ticker: Stock ticker symbol (e.g. AAPL, MSFT).
         option_type: 'call' or 'put' (default: call).
-        expiration: Expiration date as YYYY-MM-DD.  If omitted, returns the
-                    nearest available expiration.
+        expiration: Expiration date as YYYY-MM-DD. If omitted, returns all
+                    expirations (can be thousands of contracts).
     """
     try:
         if not validate_ticker(ticker):
@@ -3903,8 +3903,8 @@ def get_options_chain(
             bid_str = f"${bid:.2f}" if isinstance(bid, (int, float)) else "N/A"
             ask_str = f"${ask:.2f}" if isinstance(ask, (int, float)) else "N/A"
             last_str = f"${last_close:.2f}" if isinstance(last_close, (int, float)) else "N/A"
-            vol_str = f"{int(vol):,}" if vol is not None else "-"
-            oi_str = f"{int(oi):,}" if oi is not None else "-"
+            vol_str = f"{int(vol):,}" if isinstance(vol, (int, float)) else "-"
+            oi_str = f"{int(oi):,}" if isinstance(oi, (int, float)) else "-"
             iv_str = f"{iv}" if iv is not None else "-"
             delta_str = f"{delta}" if delta is not None else "-"
             change_str = ""
