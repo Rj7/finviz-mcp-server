@@ -9,11 +9,13 @@ from .screener import FinvizScreener
 from .news import FinvizNewsClient
 from .sector_analysis import FinvizSectorAnalysisClient
 from .sec_filings import FinvizSECFilingsClient
+from .options import FinvizOptionsClient
 
 __all__ = [
     'FinvizClient',
-    'FinvizScreener', 
+    'FinvizScreener',
     'FinvizNewsClient',
     'FinvizSectorAnalysisClient',
-    'FinvizSECFilingsClient'
+    'FinvizSECFilingsClient',
+    'FinvizOptionsClient',
 ]

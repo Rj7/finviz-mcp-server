@@ -15,6 +15,7 @@ from .finviz_client.screener import FinvizScreener
 from .finviz_client.news import FinvizNewsClient
 from .finviz_client.sector_analysis import FinvizSectorAnalysisClient
 from .finviz_client.sec_filings import FinvizSECFilingsClient
+from .finviz_client.options import FinvizOptionsClient
 from .field_discovery.tools import register_field_discovery_tools
 # from .finviz_client.edgar_client import EdgarAPIClient  # Disabled due to missing dependency
 
@@ -31,6 +32,7 @@ finviz_screener = FinvizScreener(api_key=finviz_api_key)
 finviz_news = FinvizNewsClient(api_key=finviz_api_key)
 finviz_sector = FinvizSectorAnalysisClient(api_key=finviz_api_key)
 finviz_sec = FinvizSECFilingsClient(api_key=finviz_api_key)
+finviz_options = FinvizOptionsClient(api_key=finviz_api_key)
 
 # Initialize EDGAR API client
 # edgar_client = EdgarAPIClient()  # Disabled due to missing dependency
@@ -3838,4 +3840,97 @@ def custom_screener(
 
     except Exception as e:
         logger.error(f"Error in custom_screener: {str(e)}")
+        return [TextContent(type="text", text=f"Error: {str(e)}")]
+
+
+@server.tool()
+def get_options_chain(
+    ticker: str,
+    option_type: str = "call",
+    expiration: Optional[str] = None,
+) -> List[TextContent]:
+    """
+    Get options chain for a stock (calls or puts).
+
+    Returns real-time bid/ask, last price, volume, open interest, IV, and
+    Greeks (delta, gamma, theta, vega, rho) for each contract.
+
+    Args:
+        ticker: Stock ticker symbol (e.g. AAPL, MSFT).
+        option_type: 'call' or 'put' (default: call).
+        expiration: Expiration date as YYYY-MM-DD.  If omitted, returns the
+                    nearest available expiration.
+    """
+    try:
+        if not validate_ticker(ticker):
+            raise ValueError(f"Invalid ticker: {ticker}")
+
+        if option_type not in ("call", "put"):
+            raise ValueError(f"option_type must be 'call' or 'put', got: {option_type}")
+
+        contracts = finviz_options.get_options_chain(
+            ticker, option_type=option_type, expiration=expiration,
+        )
+
+        if not contracts:
+            return [TextContent(
+                type="text",
+                text=f"No {option_type} options found for {ticker.upper()}"
+                     + (f" expiring {expiration}" if expiration else ""),
+            )]
+
+        lines = [
+            f"Options Chain: {ticker.upper()} {option_type.upper()}S"
+            + (f" (exp {expiration})" if expiration else ""),
+            "=" * 70,
+            "",
+        ]
+
+        for c in contracts:
+            strike = c.get("strike")
+            bid = c.get("bid")
+            ask = c.get("ask")
+            last_close = c.get("last_close")
+            vol = c.get("volume")
+            oi = c.get("open_interest")
+            iv = c.get("iv")
+            delta = c.get("delta")
+            change = c.get("change")
+            change_pct = c.get("change_pct")
+            exp = c.get("expiration")
+
+            strike_str = f"${strike}" if strike is not None else "N/A"
+            bid_str = f"${bid:.2f}" if isinstance(bid, (int, float)) else "N/A"
+            ask_str = f"${ask:.2f}" if isinstance(ask, (int, float)) else "N/A"
+            last_str = f"${last_close:.2f}" if isinstance(last_close, (int, float)) else "N/A"
+            vol_str = f"{int(vol):,}" if vol is not None else "-"
+            oi_str = f"{int(oi):,}" if oi is not None else "-"
+            iv_str = f"{iv}" if iv is not None else "-"
+            delta_str = f"{delta}" if delta is not None else "-"
+            change_str = ""
+            if change is not None:
+                change_str = f" | Chg: ${change}"
+            if change_pct is not None:
+                change_str += f" ({change_pct})"
+            exp_str = f" [exp {exp}]" if exp is not None else ""
+
+            lines.append(f"Strike {strike_str}{exp_str} | Bid: {bid_str} | Ask: {ask_str} | Last: {last_str}{change_str}")
+            lines.append(f"  Vol: {vol_str} | OI: {oi_str} | IV: {iv_str} | Delta: {delta_str}")
+
+            # Additional Greeks on a third line if present
+            greeks = []
+            for g in ("gamma", "theta", "vega", "rho"):
+                val = c.get(g)
+                if val is not None:
+                    greeks.append(f"{g.capitalize()}: {val}")
+            if greeks:
+                lines.append(f"  {' | '.join(greeks)}")
+
+            lines.append("")
+
+        lines.append(f"Total contracts: {len(contracts)}")
+        return [TextContent(type="text", text="\n".join(lines))]
+
+    except Exception as e:
+        logger.error(f"Error in get_options_chain: {str(e)}")
         return [TextContent(type="text", text=f"Error: {str(e)}")]
