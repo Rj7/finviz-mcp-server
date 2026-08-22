@@ -9,7 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent
 
 from .utils.validators import validate_ticker, validate_tickers, parse_tickers, validate_market_cap, validate_earnings_date, validate_price_range, validate_sector, validate_volume, validate_screening_params, validate_data_fields, validate_and_normalize_raw_filters, validate_raw_sort_order, validate_signal
-from .utils.formatters import format_large_number
+from .utils.formatters import format_large_number, format_raw_field_label, format_raw_field_value
 from .finviz_client.base import FinvizClient
 from .finviz_client.screener import FinvizScreener
 from .finviz_client.news import FinvizNewsClient
@@ -17,7 +17,16 @@ from .finviz_client.sector_analysis import FinvizSectorAnalysisClient
 from .finviz_client.sec_filings import FinvizSECFilingsClient
 from .finviz_client.options import FinvizOptionsClient
 from .field_discovery.tools import register_field_discovery_tools
-# from .finviz_client.edgar_client import EdgarAPIClient  # Disabled due to missing dependency
+
+# The EDGAR client needs `sec-edgar-api` (which in turn needs pyrate-limiter <4;
+# see requirements.txt). Import defensively so a broken/absent install degrades
+# the six EDGAR tools instead of taking the whole server down at startup.
+try:
+    from .finviz_client.edgar_client import EdgarAPIClient
+    EDGAR_IMPORT_ERROR = None
+except Exception as _edgar_import_error:  # ImportError, or a dep raising at import time
+    EdgarAPIClient = None
+    EDGAR_IMPORT_ERROR = _edgar_import_error
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -34,34 +43,45 @@ finviz_sector = FinvizSectorAnalysisClient(api_key=finviz_api_key)
 finviz_sec = FinvizSECFilingsClient(api_key=finviz_api_key)
 finviz_options = FinvizOptionsClient(api_key=finviz_api_key)
 
-# Initialize EDGAR API client
-# edgar_client = EdgarAPIClient()  # Disabled due to missing dependency
+# Fallback used only when EdgarAPIClient could not be imported. Every method
+# raises rather than returning a sentinel: the previous stub returned None/[]
+# and the tool handlers then reported plausible-but-wrong causes (e.g. "Could
+# not find CIK ... verify the ticker symbol" for what was really a missing
+# package). Handlers wrap calls in `except Exception` and echo str(e), so
+# raising surfaces the real reason at the call site.
+class EdgarClientUnavailable:
+    def __init__(self, reason: Optional[BaseException] = None):
+        detail = f" ({reason})" if reason else ""
+        self._message = (
+            "EDGAR API client is unavailable: the 'sec-edgar-api' package failed "
+            f"to import{detail}. Install it with `pip install -r requirements.txt`."
+        )
 
-# Create stub for EDGAR client when disabled
-class EdgarClientStub:
-    def get_filing_document_content(self, *args, **kwargs):
-        return {"status": "error", "error": "EDGAR API client is disabled due to missing dependencies"}
-    
-    def get_multiple_filing_contents(self, *args, **kwargs):
-        return []
-    
-    def get_company_filings(self, *args, **kwargs):
-        return []
-    
-    def _get_cik_from_ticker(self, *args, **kwargs):
-        return None
-    
-    def get_company_concept(self, *args, **kwargs):
-        return {"error": "EDGAR API client is disabled due to missing dependencies"}
-    
+    def _fail(self, *args, **kwargs):
+        raise RuntimeError(self._message)
+
+    get_filing_document_content = _fail
+    get_multiple_filing_contents = _fail
+    get_company_filings = _fail
+    _get_cik_from_ticker = _fail
+    get_company_concept = _fail
+    # Reached via the `client` property below (edgar_client.client.get_company_facts)
+    get_company_facts = _fail
+    get_submissions = _fail
+
     @property
     def client(self):
-        class StubClient:
-            def get_company_facts(self, *args, **kwargs):
-                return None
-        return StubClient()
+        return self
 
-edgar_client = EdgarClientStub()
+
+# Initialize EDGAR API client
+if EdgarAPIClient is not None:
+    edgar_client = EdgarAPIClient()
+else:
+    logger.warning(
+        "EDGAR tools disabled: could not import sec-edgar-api (%s)", EDGAR_IMPORT_ERROR
+    )
+    edgar_client = EdgarClientUnavailable(EDGAR_IMPORT_ERROR)
 
 @server.tool()
 def earnings_screener(
@@ -268,27 +288,57 @@ def get_stock_fundamentals(
                 return fundamental_data.get(key, default)
             else:
                 return getattr(fundamental_data, key, default)
-        
+
+        # The curated sections below only cover ~35 well-known fields. Anything
+        # else the caller asked for via data_fields used to be fetched, counted
+        # in "Data Coverage", and then silently dropped from the output. Track
+        # which source keys a section consumed so the catch-all at the end can
+        # print the remainder instead.
+        rendered_keys = set()
+
+        def take(key, default=None):
+            rendered_keys.add(key)
+            return get_data(key, default)
+
+        def take_any(*keys):
+            """First non-None of `keys`; marks all of them as rendered."""
+            value = None
+            for key in keys:
+                candidate = take(key)
+                if value is None:
+                    value = candidate
+            return value
+
         # 重要な基本情報を最初に表示
         basic_info = {
-            'Company': get_data('company'),  # 実際に取得されるフィールド名
-            'Sector': get_data('sector'),
-            'Industry': get_data('industry'),
-            'Country': get_data('country'),
-            'Market Cap': get_data('market_cap'),  # 実際に取得されるフィールド名
-            'Price': get_data('price'),
-            'Volume': get_data('volume'),
-            'Avg Volume': get_data('average_volume')  # 実際に取得されるフィールド名
+            'Company': take('company'),  # 実際に取得されるフィールド名
+            'Sector': take('sector'),
+            'Industry': take('industry'),
+            'Country': take('country'),
+            'Market Cap': take('market_cap'),  # 実際に取得されるフィールド名
+            'Price': take('price'),
+            'Volume': take('volume'),
+            'Avg Volume': take('average_volume')  # 実際に取得されるフィールド名
         }
         
-        output_lines.append("📋 Basic Information:")
-        output_lines.append("-" * 30)
+        # Only emit the header when there is something under it — a data_fields
+        # request that selects nothing from this section used to print a bare
+        # heading with no rows.
+        has_basic_info = any(v is not None for v in basic_info.values())
+        if has_basic_info:
+            output_lines.append("📋 Basic Information:")
+            output_lines.append("-" * 30)
         for key, value in basic_info.items():
             if value is not None:
                 if key == 'Price' and isinstance(value, (int, float)):
                     output_lines.append(f"{key:15}: ${value:.2f}")
-                elif key in ['Volume', 'Avg Volume'] and isinstance(value, (int, float)):
+                elif key == 'Volume' and isinstance(value, (int, float)):
                     output_lines.append(f"{key:15}: {value:,}")
+                elif key == 'Avg Volume' and isinstance(value, (int, float)):
+                    # FinViz reports Average Volume in THOUSANDS of shares, unlike
+                    # Volume which is raw. Printing both through the same formatter
+                    # made avg look ~1000x smaller than the day's volume.
+                    output_lines.append(f"{key:15}: {value * 1e3:,.0f}")
                 elif key == 'Market Cap' and isinstance(value, (int, float)):
                     # 時価総額データは百万ドル単位で格納されているため、百万倍してから変換
                     actual_value = value * 1e6  # 百万ドル単位を実際の金額に変換
@@ -302,17 +352,18 @@ def get_stock_fundamentals(
                         output_lines.append(f"{key:15}: ${actual_value:,.0f}")
                 else:
                     output_lines.append(f"{key:15}: {value}")
-        output_lines.append("")
-        
+        if has_basic_info:
+            output_lines.append("")
+
         # バリュエーション指標 - フィールド名を修正
         valuation_metrics = {
-            'P/E Ratio': get_data('p_e'),  # 実際に取得されるフィールド名
-            'Forward P/E': get_data('forward_p_e'),
-            'PEG': get_data('peg'),
-            'P/S Ratio': get_data('p_s'),
-            'P/B Ratio': get_data('p_b'),
-            'EPS': get_data('eps_ttm'),
-            'Dividend Yield': get_data('dividend_yield')
+            'P/E Ratio': take('p_e'),  # 実際に取得されるフィールド名
+            'Forward P/E': take('forward_p_e'),
+            'PEG': take('peg'),
+            'P/S Ratio': take('p_s'),
+            'P/B Ratio': take('p_b'),
+            'EPS': take('eps_ttm'),
+            'Dividend Yield': take('dividend_yield')
         }
         
         if any(v is not None for v in valuation_metrics.values()):
@@ -330,12 +381,12 @@ def get_stock_fundamentals(
         
         # パフォーマンス指標 - フィールド名を修正
         performance_metrics = {
-            '1 Week': get_data('performance_week'),  # 実際に取得されるフィールド名
-            '1 Month': get_data('performance_month'),  # 実際に取得されるフィールド名
-            '3 Months': get_data('performance_quarter'),  # 実際に取得されるフィールド名
-            '6 Months': get_data('performance_half_year'),  # 実際に取得されるフィールド名
-            'YTD': get_data('performance_ytd'),
-            '1 Year': get_data('performance_year')  # 実際に取得されるフィールド名
+            '1 Week': take('performance_week'),  # 実際に取得されるフィールド名
+            '1 Month': take('performance_month'),  # 実際に取得されるフィールド名
+            '3 Months': take('performance_quarter'),  # 実際に取得されるフィールド名
+            '6 Months': take('performance_half_year'),  # 実際に取得されるフィールド名
+            'YTD': take('performance_ytd'),
+            '1 Year': take('performance_year')  # 実際に取得されるフィールド名
         }
         
         if any(v is not None for v in performance_metrics.values()):
@@ -348,11 +399,11 @@ def get_stock_fundamentals(
         
         # 決算関連データ
         earnings_data = {
-            'Earnings Date': get_data('earnings_date'),
-            'EPS Surprise': get_data('eps_surprise'),
-            'Revenue Surprise': get_data('revenue_surprise'),
-            'EPS Growth QoQ': get_data('eps_growth_quarter_over_quarter'),
-            'Sales Growth QoQ': get_data('sales_growth_quarter_over_quarter')
+            'Earnings Date': take('earnings_date'),
+            'EPS Surprise': take('eps_surprise'),
+            'Revenue Surprise': take('revenue_surprise'),
+            'EPS Growth QoQ': take('eps_growth_quarter_over_quarter'),
+            'Sales Growth QoQ': take('sales_growth_quarter_over_quarter')
         }
         
         if any(v is not None for v in earnings_data.values()):
@@ -368,24 +419,29 @@ def get_stock_fundamentals(
         
         # テクニカル指標
         technical_data = {
-            'RSI': get_data('relative_strength_index_14'),
-            'Beta': get_data('beta'),
-            'Volatility': get_data('volatility_week'),
-            'Relative Volume': get_data('relative_volume'),
-            '20D SMA': get_data('20_day_simple_moving_average') or get_data('sma_20'),
-            '50D SMA': get_data('50_day_simple_moving_average') or get_data('sma_50'),
-            '200D SMA': get_data('200_day_simple_moving_average') or get_data('sma_200'),
-            '52W High': get_data('52_week_high'),
-            '52W Low': get_data('52_week_low')
+            'RSI': take('relative_strength_index_14'),
+            'Beta': take('beta'),
+            'Volatility': take('volatility_week'),
+            'Relative Volume': take('relative_volume'),
+            '20D SMA': take_any('20_day_simple_moving_average', 'sma_20'),
+            '50D SMA': take_any('50_day_simple_moving_average', 'sma_50'),
+            '200D SMA': take_any('200_day_simple_moving_average', 'sma_200'),
+            '52W High': take('52_week_high'),
+            '52W Low': take('52_week_low'),
+            'All Time High': take('all_time_high')
         }
-        
+
         if any(v is not None for v in technical_data.values()):
             output_lines.append("🔧 Technical Indicators:")
             output_lines.append("-" * 30)
             for key, value in technical_data.items():
                 if value is not None:
-                    if key in ['52W High', '52W Low'] and isinstance(value, (int, float)):
-                        output_lines.append(f"{key:15}: ${value:.2f}")
+                    if key in ['52W High', '52W Low', 'All Time High'] and isinstance(value, (int, float)):
+                        # These FinViz columns are the percent distance of the
+                        # current price from that level, NOT a price. Printing
+                        # them with a "$" produced impossible values like a
+                        # negative 52-week high.
+                        output_lines.append(f"{key:15}: {value:+.2f}% from {'high' if 'High' in key else 'low'}")
                     elif isinstance(value, (int, float)):
                         output_lines.append(f"{key:15}: {value:.2f}")
                     else:
@@ -399,9 +455,24 @@ def get_stock_fundamentals(
         else:
             fundamental_data_dict = fundamental_data.to_dict() if hasattr(fundamental_data, 'to_dict') else dict(fundamental_data)
             
+        # Catch-all: any populated field the curated sections above did not
+        # render. Without this, a caller passing data_fields=[...] for anything
+        # outside the ~35 hardcoded labels got a high "Data Coverage" number and
+        # no values to go with it.
+        remaining = {
+            k: v for k, v in fundamental_data_dict.items()
+            if v is not None and k not in rendered_keys
+        }
+        if remaining:
+            output_lines.append("📈 Other Fields:")
+            output_lines.append("-" * 30)
+            for key in sorted(remaining):
+                output_lines.append(f"{format_raw_field_label(key):28}: {format_raw_field_value(key, remaining[key])}")
+            output_lines.append("")
+
         non_null_fields = sum(1 for v in fundamental_data_dict.values() if v is not None)
         total_fields = len(fundamental_data_dict)
-        
+
         output_lines.extend([
             f"📋 Data Coverage: {non_null_fields}/{total_fields} fields ({non_null_fields/total_fields*100:.1f}%)",
             f"🔍 All Available Fields: {', '.join(sorted([k for k, v in fundamental_data_dict.items() if v is not None]))}"

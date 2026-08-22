@@ -5,3 +5,7 @@ python-dotenv>=1.0.0
 pydantic>=2.0.0
 aiohttp>=3.8.0
 sec-edgar-api>=0.3.0
+# sec-edgar-api calls Limiter(..., raise_when_fail=True), removed in
+# pyrate-limiter 4.x — an unpinned install raises TypeError at import time and
+# silently disables all six EDGAR tools.
+pyrate-limiter>=3,<4

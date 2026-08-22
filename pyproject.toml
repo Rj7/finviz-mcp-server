@@ -41,6 +41,10 @@ dependencies = [
     "pandas>=2.0.0",
     "beautifulsoup4>=4.12.0",
     "python-dotenv>=1.0.0",
+    # EDGAR tools. pyrate-limiter must stay on 3.x: sec-edgar-api passes
+    # raise_when_fail=True to Limiter(), which 4.x removed.
+    "sec-edgar-api>=0.3.0",
+    "pyrate-limiter>=3,<4",
 ]
 
 [project.optional-dependencies]

@@ -316,10 +316,11 @@ class EdgarAPIClient:
                 return {'error': f'Could not find CIK for ticker {ticker}'}
             
             # Get concept data
+            # The SDK names this parameter `tag` (the XBRL tag), not `concept`.
             concept_data = self.client.get_company_concept(
                 cik=cik,
                 taxonomy=taxonomy,
-                concept=concept
+                tag=concept
             )
             
             return concept_data
