@@ -4,7 +4,7 @@ from typing import Annotated, Any, Literal, Optional
 from pydantic import BaseModel, Field
 from mcp.server.fastmcp.exceptions import ToolError
 from .agent_contracts import Page, digest, page_info, page_position, tool_result, provider_error
-from .utils.validators import validate_ticker, validate_data_fields
+from .utils.validators import validate_ticker, validate_tickers, validate_data_fields
 from dataclasses import asdict, is_dataclass
 
 Ticker = Annotated[str, Field(description='Stock ticker, e.g. NVDA. This is a read-only data request.')]
@@ -50,7 +50,15 @@ def get_sector_specific_industry_performance(sector:str,limit:Limit=25,cursor:Cu
 def get_stock_news(tickers:str|list[str],days_back:int=7,news_type:Literal['all','earnings','analyst','insider','general']='all',limit:Limit=25,cursor:Cursor=None) -> ProviderRows:
     """Read recent stock news with publication dates and exact source URLs where available. Use cursor for additional matching articles."""
     from . import server
-    return rows_result('stock_news',{'tickers':tickers,'days_back':days_back,'news_type':news_type},server.finviz_news.get_stock_news(tickers,days_back,news_type),limit,cursor)
+    if isinstance(tickers, list):
+        if not tickers or any(not validate_ticker(t.strip()) for t in tickers):
+            raise ToolError('INVALID_ARGUMENT: supply valid stock tickers')
+        provider_tickers = ','.join(tickers)
+    else:
+        provider_tickers = tickers
+    if not validate_tickers(provider_tickers):
+        raise ToolError('INVALID_ARGUMENT: supply valid stock tickers')
+    return rows_result('stock_news',{'tickers':tickers,'days_back':days_back,'news_type':news_type},server.finviz_news.get_stock_news(provider_tickers,days_back,news_type),limit,cursor)
 
 def get_market_news(days_back:int=3,max_items:Limit=20,cursor:Cursor=None) -> ProviderRows:
     """Read recent broad-market news with source URLs and bounded pages. Missing source URLs are null rather than invented."""

@@ -1,5 +1,6 @@
 """Provider failure and exact-projection regressions from candidate review."""
 import asyncio
+from datetime import datetime
 from unittest.mock import Mock
 import pandas as pd
 import pytest
@@ -73,12 +74,75 @@ def test_legitimate_filing_can_discuss_errors(monkeypatch):
     ('get_stock_fundamentals', {'ticker':'NVDA','data_fields':['target_price']}),
     ('get_multiple_stocks_fundamentals', {'tickers':['NVDA','MSFT'],'data_fields':['target_price']}),
 ])
-def test_missing_target_price_is_not_current_price(monkeypatch, name, args):
-    monkeypatch.setattr(server.finviz_client, '_fetch_csv_from_url', lambda *a, **kw: pd.DataFrame([{'Ticker':'NVDA','Price':100,'EPS (ttm)':2},{'Ticker':'MSFT','Price':200,'EPS (ttm)':4}]))
+@pytest.mark.parametrize('fallback', [False, True])
+def test_missing_target_price_is_not_current_price(monkeypatch, name, args, fallback):
+    frames = iter([
+        pd.DataFrame(columns=['Ticker','Price']),
+        pd.DataFrame([{'Ticker':'NVDA','Price':100,'EPS (ttm)':2}]),
+        pd.DataFrame([{'Ticker':'MSFT','Price':200,'EPS (ttm)':4}]),
+    ])
+    def fetch(*args, **kwargs):
+        if fallback:
+            return next(frames)
+        return pd.DataFrame([{'Ticker':'NVDA','Price':100,'EPS (ttm)':2},{'Ticker':'MSFT','Price':200,'EPS (ttm)':4}])
+    monkeypatch.setattr(server.finviz_client, '_fetch_csv_from_url', fetch)
     value = asyncio.run(server.server.call_tool(name, args))
     for row in value.structuredContent['stocks']:
         assert row['values'] == {'target_price':None}
         assert row['missing_fields'] == ['target_price']
+
+
+@pytest.mark.parametrize('name,args', [
+    ('get_stock_fundamentals', {'ticker':'NVDA','data_fields':['price']}),
+    ('get_multiple_stocks_fundamentals', {'tickers':['NVDA','MSFT'],'data_fields':['price']}),
+    ('get_stock_fundamentals', {'ticker':'NVDA'}),
+])
+@pytest.mark.parametrize('bulk_failure', [False, True])
+def test_fundamentals_fallback_preserves_identity_and_values(monkeypatch, name, args, bulk_failure):
+    frames = iter([
+        ValueError('Bulk CSV parsing failed') if bulk_failure else pd.DataFrame(columns=['Ticker','Price']),
+        pd.DataFrame([{'Ticker':'NVDA','Price':100}]),
+        pd.DataFrame([{'Ticker':'MSFT','Price':200}]),
+    ])
+    def fetch(*args, **kwargs):
+        value = next(frames)
+        if isinstance(value, Exception):
+            raise value
+        return value
+    monkeypatch.setattr(server.finviz_client, '_fetch_csv_from_url', fetch)
+    value = asyncio.run(server.server.call_tool(name, args))
+    rows = value.structuredContent['stocks']
+    assert [(row['ticker'], row['values']['price']) for row in rows] == (
+        [('NVDA',100),('MSFT',200)] if 'tickers' in args else [('NVDA',100)]
+    )
+    for row in rows:
+        assert row['available_fields'] == 1
+        assert 'price' not in row['missing_fields']
+
+
+@pytest.mark.parametrize('tickers', ['%%%not-a-ticker%%%', '', [], ['NVDA','%%%'], ['']])
+@pytest.mark.asyncio
+async def test_stock_news_invalid_tickers_are_mcp_errors(monkeypatch, tickers):
+    from mcp.shared.memory import create_connected_server_and_client_session
+    def no_network(*args, **kwargs):
+        raise AssertionError('Invalid tickers must not reach the provider')
+    monkeypatch.setattr(server.finviz_news, '_make_request', no_network)
+    async with create_connected_server_and_client_session(server.server) as client:
+        result = await client.call_tool('get_stock_news', {'tickers':tickers})
+        assert result.isError is True
+        assert any('INVALID_ARGUMENT' in item.text for item in result.content if item.type == 'text')
+
+
+@pytest.mark.parametrize('tickers', ['nvda, MSFT', ['nvda','MSFT']])
+def test_stock_news_accepts_string_and_list_tickers(monkeypatch, tickers):
+    date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    body = f'Title,Date,Source,Link\nRevenue grows,{date},Fixture,https://example.test/news\n'
+    monkeypatch.setattr(server.finviz_news, '_make_request', lambda *a, **kw: response(body))
+    result = asyncio.run(server.server.call_tool('get_stock_news', {'tickers':tickers}))
+    assert not result.isError
+    assert len(result.structuredContent['rows']) == 1
+    assert result.structuredContent['rows'][0]['ticker'] == 'NVDA,MSFT'
+    assert result.structuredContent['rows'][0]['url'] == 'https://example.test/news'
 
 
 @pytest.mark.asyncio

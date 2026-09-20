@@ -1613,16 +1613,10 @@ class FinvizClient:
                     elif actual_field in result:
                         filtered_result[field] = result[actual_field]
                     else:
-                        # 部分一致で検索
-                        found = False
-                        for key in result.keys():
-                            if actual_field.lower() in key.lower() or key.lower() in actual_field.lower():
-                                filtered_result[field] = result[key]
-                                found = True
-                                break
-                        if not found:
-                            logger.warning(f"Field '{field}' (mapped to '{actual_field}') not found for {ticker}")
-                            filtered_result[field] = None
+                        # Match the bulk projection: a related column is not
+                        # the requested financial metric (e.g. Price vs Target Price).
+                        logger.warning(f"Field '{field}' (mapped to '{actual_field}') not found for {ticker}")
+                        filtered_result[field] = None
                 
                 return filtered_result
             
@@ -1679,7 +1673,9 @@ class FinvizClient:
                 for ticker in tickers:
                     individual_data = self.get_stock_fundamentals(ticker, data_fields)
                     if individual_data:
-                        results.append(individual_data)
+                        # Field projection may omit ticker; batch consumers still
+                        # need the requested identity to associate returned values.
+                        results.append({**individual_data, 'ticker': ticker.upper()})
                     else:
                         # 空の結果を追加
                         empty_result = {'ticker': ticker}
@@ -1798,7 +1794,7 @@ class FinvizClient:
                 try:
                     individual_data = self.get_stock_fundamentals(ticker, data_fields)
                     if individual_data:
-                        results.append(individual_data)
+                        results.append({**individual_data, 'ticker': ticker.upper()})
                     else:
                         # 空の結果を追加
                         empty_result = {'ticker': ticker}
