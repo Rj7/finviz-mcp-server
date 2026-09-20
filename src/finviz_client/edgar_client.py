@@ -209,6 +209,17 @@ class EdgarAPIClient:
             # values and table cells remain visible in document order.
             from bs4 import BeautifulSoup
             document = BeautifulSoup(response.text, 'html.parser')
+            # SEC returns some denial pages with HTTP 200. Inspect the page
+            # identity, not arbitrary filing prose mentioning errors or access.
+            heading = document.find(['h1', 'h2'])
+            title = document.title.get_text(' ', strip=True).lower() if document.title else ''
+            heading_text = heading.get_text(' ', strip=True).lower() if heading else ''
+            identity = title + ' ' + heading_text
+            if 'request rate threshold exceeded' in identity:
+                raise ValueError('RATE_LIMITED: SEC request threshold exceeded; retry later')
+            if ('access denied' in identity or 'undeclared automated tool' in identity
+                    or document.get_text(' ', strip=True).lower().startswith('access denied:')):
+                raise ValueError('UPSTREAM_AUTH: SEC denied document access; check client identification')
             for node in document.find_all(['head', 'script', 'style', 'noscript', 'ix:hidden']):
                 node.decompose()
             content = document.get_text('\n', strip=True)

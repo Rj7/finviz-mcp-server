@@ -1140,25 +1140,16 @@ class FinvizClient:
             
             # CSV データを取得
             logger.info(f"Finviz CSV export URL: {self.EXPORT_URL}")
-            logger.info(f"Finviz CSV export params: {finviz_params}")
             response = self._make_request(self.EXPORT_URL, finviz_params)
             
-            # レスポンスがCSVかHTMLかをチェック
-            if response.text.startswith('<!DOCTYPE html>'):
-                logger.error("Received HTML instead of CSV. API key may be invalid or not authorized.")
-                return pd.DataFrame()
-            
-            # CSVをDataFrameに変換
-            from io import StringIO
-            csv_data = StringIO(response.text)
-            df = pd.read_csv(csv_data)
+            df = self._validated_csv(response, self.EXPORT_URL)
             
             # 強制的に結果数を制限（Finvizのarパラメータが機能しない場合の対策）
             if 'max_results' in filters and filters['max_results'] is not None:
                 max_results = min(filters['max_results'], 1000)  # 最大1000に制限
                 if len(df) > max_results:
                     df = df.head(max_results)
-                    logger.info(f"Results truncated from {len(pd.read_csv(StringIO(response.text)))} to {max_results} rows")
+                    logger.info(f"Results bounded to {max_results} rows")
             
             logger.info(f"Successfully fetched CSV data with {len(df)} rows")
             # デバッグ: CSVのカラムを確認（大量データの場合は省略）
@@ -1174,8 +1165,7 @@ class FinvizClient:
         except ToolError:
             raise
         except Exception as e:
-            logger.error(f"Error fetching CSV data: {e}")
-            return pd.DataFrame()
+            raise provider_error(e) from e
     
     def _parse_stock_data_from_csv(self, row: pd.Series) -> StockData:
         """
@@ -1460,6 +1450,35 @@ class FinvizClient:
         
         return stock_data
     
+    def _validated_csv(self, response, export_url: str) -> pd.DataFrame:
+        """Validate provider payload and endpoint identity before accepting emptiness."""
+        from io import StringIO
+        body = response.text.lstrip('\ufeff \t\r\n')
+        if body.lower().startswith(('<!doctype html', '<html')):
+            raise ToolError('UPSTREAM_AUTH: HTML instead of CSV; check provider access')
+        if not body:
+            raise ToolError('UPSTREAM_UNAVAILABLE: empty CSV response')
+        if body.startswith(('{', '[')):
+            raise ToolError('PROVIDER_CONTRACT: provider returned a JSON envelope instead of CSV')
+        if len(body.encode('utf-8')) > 8 * 1024 * 1024:
+            raise ToolError('PROVIDER_CONTRACT: CSV response exceeds 8 MiB')
+        try:
+            df = pd.read_csv(StringIO(body), on_bad_lines='error')
+        except Exception as exc:
+            raise ToolError('PROVIDER_CONTRACT: malformed CSV response') from exc
+        columns = set(df.columns)
+        if export_url == self.NEWS_EXPORT_URL:
+            valid = {'Title', 'Date'}.issubset(columns)
+        elif export_url == self.GROUPS_EXPORT_URL:
+            valid = bool(columns & {'Name', 'Industry', 'Country'})
+        elif export_url in (self.EXPORT_URL, self.QUOTE_EXPORT_URL):
+            valid = 'Ticker' in columns
+        else:
+            raise ToolError('PROVIDER_CONTRACT: unrecognized CSV endpoint')
+        if not valid:
+            raise ToolError('PROVIDER_CONTRACT: required endpoint CSV columns are missing')
+        return df
+
     def _fetch_csv_from_url(self, export_url: str, params: Dict[str, Any] = None) -> pd.DataFrame:
         """
         指定されたエクスポートURLからCSVデータを取得
@@ -1493,25 +1512,7 @@ class FinvizClient:
             # CSV データを取得
             response = self._make_request(export_url, export_params)
             
-            # レスポンスがCSVかHTMLかをチェック
-            if response.text.startswith('<!DOCTYPE html>') or '<html' in response.text.lower():
-                logger.error(f"Received HTML instead of CSV from {export_url}")
-                logger.error("This may indicate authentication or parameter issues")
-                raise ValueError('UPSTREAM_AUTH: HTML instead of CSV; check provider access')
-            
-            # CSV形式かどうかを確認
-            if not response.text.strip():
-                logger.error(f"Empty response from {export_url}")
-                raise ValueError('UPSTREAM_UNAVAILABLE: empty CSV response')
-            if len(response.content)>8*1024*1024:
-                raise ValueError('PROVIDER_CONTRACT: CSV response exceeds 8 MiB')
-            
-            # CSVをDataFrameに変換
-            from io import StringIO
-            csv_data = StringIO(response.text)
-            df = pd.read_csv(csv_data)
-            
-            return df
+            return self._validated_csv(response, export_url)
             
         except ToolError:
             raise
@@ -1757,16 +1758,10 @@ class FinvizClient:
                             elif actual_field in result:
                                 filtered_result[field] = result[actual_field]
                             else:
-                                # 部分一致で検索
-                                found = False
-                                for key in result.keys():
-                                    if actual_field.lower() in key.lower() or key.lower() in actual_field.lower():
-                                        filtered_result[field] = result[key]
-                                        found = True
-                                        break
-                                if not found:
-                                    logger.warning(f"Field '{field}' (mapped to '{actual_field}') not found for {result.get('ticker', f'row {idx}')}")
-                                    filtered_result[field] = None
+                                # A related name is not the same financial metric.
+                                # Missing exact canonical/verified aliases stay null.
+                                logger.warning(f"Field '{field}' not found for {result.get('ticker', f'row {idx}')}")
+                                filtered_result[field] = None
                         
                         results.append(filtered_result)
                     else:
