@@ -79,3 +79,33 @@ def test_missing_target_price_is_not_current_price(monkeypatch, name, args):
     for row in value.structuredContent['stocks']:
         assert row['values'] == {'target_price':None}
         assert row['missing_fields'] == ['target_price']
+
+
+@pytest.mark.asyncio
+async def test_real_mcp_session_preserves_errors_and_partial_filing_batches(monkeypatch):
+    from mcp.shared.memory import create_connected_server_and_client_session
+    monkeypatch.setattr(server.finviz_screener, 'api_key', 'fixture')
+    monkeypatch.setattr(server.finviz_screener, '_make_request', lambda *a, **kw: response('<html>Log in</html>'))
+    monkeypatch.setattr(server.finviz_news, '_make_request', lambda *a, **kw: response('{"error":"subscription expired"}'))
+    monkeypatch.setattr(server.edgar_client, '_get_cik_from_ticker', lambda _: '1')
+    monkeypatch.setattr(server.edgar_client.session, 'get', lambda url, **kw: response('<html><title>Access Denied</title></html>' if 'blocked.htm' in url else '<html><body>Revenue USD 100 million.</body></html>'))
+    blocked = {'accession_number':'0001-26-01','primary_document':'blocked.htm'}
+    good = {'accession_number':'0001-26-02','primary_document':'report.htm'}
+    async with create_connected_server_and_client_session(server.server) as client:
+        await client.list_tools()
+        for name, args in [
+            ('get_relative_volume_stocks', {'min_relative_volume':2}),
+            ('get_market_news', {}),
+            ('get_edgar_filing_content', {'ticker':'NVDA', **blocked}),
+            ('get_multiple_edgar_filing_contents', {'ticker':'NVDA','filings_data':[blocked]}),
+        ]:
+            result = await client.call_tool(name, args)
+            assert result.isError is True, name
+            assert any('UPSTREAM_' in item.text or 'PROVIDER_CONTRACT' in item.text for item in result.content if item.type == 'text')
+        result = await client.call_tool('get_multiple_edgar_filing_contents', {'ticker':'NVDA','filings_data':[blocked,good]})
+        assert result.isError is False
+        assert result.structuredContent['partial'] is True
+        assert result.structuredContent['failed'] == 1
+        assert result.structuredContent['succeeded'] == 1
+        assert result.structuredContent['items'][0]['status'] == 'error'
+        assert 'Revenue USD 100 million' in result.structuredContent['items'][1]['content']
