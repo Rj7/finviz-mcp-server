@@ -1,7 +1,7 @@
 import pandas as pd
 import logging
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import requests
 
 from .base import FinvizClient
@@ -13,6 +13,7 @@ class FinvizSECFilingsClient(FinvizClient):
     """Finviz SECファイリングデータクライアント"""
     
     SEC_FILINGS_EXPORT_URL = f"{FinvizClient.BASE_URL}/export/latest-filings"
+    now = staticmethod(lambda: datetime.now(timezone.utc))
     
     def get_sec_filings(
         self,
@@ -70,11 +71,15 @@ class FinvizSECFilingsClient(FinvizClient):
                 filings_data = [f for f in filings_data if f.form in form_types]
             
             # 日付フィルタリング
-            cutoff_date = datetime.now() - timedelta(days=days_back)
+            cutoff_date = self.now() - timedelta(days=days_back)
             filings_data = [
                 f for f in filings_data 
                 if self._parse_date(f.filing_date) >= cutoff_date
             ]
+            if sort_by in ('filing_date', 'report_date'):
+                filings_data.sort(key=lambda f: self._parse_date(getattr(f, sort_by)), reverse=sort_order == 'desc')
+            elif sort_by == 'form':
+                filings_data.sort(key=lambda f: f.form, reverse=sort_order == 'desc')
             
             # 最大件数制限
             if max_results and max_results > 0:
@@ -85,7 +90,7 @@ class FinvizSECFilingsClient(FinvizClient):
             
         except Exception as e:
             logger.error(f"Error retrieving SEC filings for {ticker}: {e}")
-            return []
+            raise
     
     def get_recent_filings_by_form(
         self,
@@ -181,10 +186,12 @@ class FinvizSECFilingsClient(FinvizClient):
             # CSVパラメータを調整してエラーを回避
             df = pd.read_csv(
                 StringIO(csv_text),
-                on_bad_lines='skip',  # 不正な行をスキップ
+                on_bad_lines='error',
                 dtype=str,  # 全てを文字列として読み込み
                 na_filter=False  # NAフィルタを無効化
             )
+            if not {'Filing Date', 'Form'}.issubset(df.columns):
+                raise ValueError('PROVIDER_CONTRACT: SEC CSV lacks Filing Date/Form columns')
             
             logger.info(f"Successfully parsed CSV with {len(df)} rows")
             
@@ -227,7 +234,7 @@ class FinvizSECFilingsClient(FinvizClient):
             # デバッグ用にCSVテキストの最初の部分をログ出力
             csv_preview = csv_text[:500] if csv_text else "Empty CSV"
             logger.debug(f"CSV preview: {csv_preview}")
-            return []
+            raise ValueError('PROVIDER_CONTRACT: invalid SEC filings CSV') from e
     
     def _parse_date(self, date_str: str) -> datetime:
         """
@@ -239,17 +246,12 @@ class FinvizSECFilingsClient(FinvizClient):
         Returns:
             datetime オブジェクト
         """
-        try:
-            # MM/DD/YY形式を想定
-            return datetime.strptime(date_str, '%m/%d/%y')
-        except ValueError:
+        for format in ('%m/%d/%Y', '%m/%d/%y', '%Y-%m-%d'):
             try:
-                # YYYY-MM-DD形式も試す
-                return datetime.strptime(date_str, '%Y-%m-%d')
+                return datetime.strptime(date_str, format).replace(tzinfo=timezone.utc)
             except ValueError:
-                # パースできない場合は現在日時を返す
-                logger.warning(f"Could not parse date: {date_str}")
-                return datetime.now()
+                continue
+        raise ValueError(f'PROVIDER_CONTRACT: unsupported SEC date {date_str!r}')
     
     def get_filing_summary(
         self,

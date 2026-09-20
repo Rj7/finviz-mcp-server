@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 import asyncio
+from .agent_tools import get_stock_news, get_market_news, get_sector_news, get_sector_performance, get_industry_performance, get_country_performance, get_sector_specific_industry_performance, get_market_overview
+from .agent_tools import get_relative_volume_stocks
+from mcp.server.fastmcp.exceptions import ToolError
+from .agent_tools import get_stock_fundamentals, get_multiple_stocks_fundamentals, get_edgar_filing_content, get_multiple_edgar_filing_contents, get_options_chain
 import json
 import logging
 import os
 from typing import Any, Dict, List, Optional, Union
 
 from mcp.server.fastmcp import FastMCP
+from .tool_policy import ContractFastMCP
 from mcp.types import TextContent
 
 from .utils.validators import validate_ticker, validate_tickers, parse_tickers, validate_market_cap, validate_earnings_date, validate_price_range, validate_sector, validate_volume, validate_screening_params, validate_data_fields, validate_and_normalize_raw_filters, validate_raw_sort_order, validate_signal
@@ -32,7 +37,7 @@ except Exception as _edgar_import_error:  # ImportError, or a dep raising at imp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-server = FastMCP("Finviz MCP Server")
+server = ContractFastMCP("Finviz MCP Server")
 
 # Initialize Finviz clients
 finviz_api_key = os.getenv('FINVIZ_API_KEY')
@@ -182,7 +187,7 @@ def earnings_screener(
         
     except Exception as e:
         logger.error(f"Error in earnings_screener: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 @server.tool()
 def volume_surge_screener() -> List[TextContent]:
@@ -242,431 +247,13 @@ def volume_surge_screener() -> List[TextContent]:
         
     except Exception as e:
         logger.error(f"Error in volume_surge_screener: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 
 
-@server.tool()
-def get_stock_fundamentals(
-    ticker: str,
-    data_fields: Optional[List[str]] = None
-) -> List[TextContent]:
-    """
-    個別銘柄のファンダメンタルデータ取得（全128カラム対応）
-    
-    Args:
-        ticker: 銘柄ティッカー
-        data_fields: 取得データフィールド（指定しない場合は全フィールド）
-    """
-    try:
-        # Validate ticker
-        if not validate_ticker(ticker):
-            raise ValueError(f"Invalid ticker: {ticker}")
-        
-        # Validate data fields
-        if data_fields:
-            field_errors = validate_data_fields(data_fields)
-            if field_errors:
-                raise ValueError(f"Invalid data fields: {', '.join(field_errors)}")
-        
-        # Get fundamental data
-        fundamental_data = finviz_client.get_stock_fundamentals(ticker, data_fields)
-        
-        if not fundamental_data:
-            return [TextContent(type="text", text=f"No data found for ticker: {ticker}")]
-        
-        # Format output with categories
-        output_lines = [
-            f"📊 Fundamental Data for {ticker}:",
-            "=" * 60,
-            ""
-        ]
-        
-        # データ取得用のヘルパー関数
-        def get_data(key, default=None):
-            if isinstance(fundamental_data, dict):
-                return fundamental_data.get(key, default)
-            else:
-                return getattr(fundamental_data, key, default)
+server.add_tool(get_stock_fundamentals)
 
-        # The curated sections below only cover ~35 well-known fields. Anything
-        # else the caller asked for via data_fields used to be fetched, counted
-        # in "Data Coverage", and then silently dropped from the output. Track
-        # which source keys a section consumed so the catch-all at the end can
-        # print the remainder instead.
-        rendered_keys = set()
-
-        def take(key, default=None):
-            rendered_keys.add(key)
-            return get_data(key, default)
-
-        def take_any(*keys):
-            """First non-None of `keys`; marks all of them as rendered."""
-            value = None
-            for key in keys:
-                candidate = take(key)
-                if value is None:
-                    value = candidate
-            return value
-
-        # 重要な基本情報を最初に表示
-        basic_info = {
-            'Company': take('company'),  # 実際に取得されるフィールド名
-            'Sector': take('sector'),
-            'Industry': take('industry'),
-            'Country': take('country'),
-            'Market Cap': take('market_cap'),  # 実際に取得されるフィールド名
-            'Price': take('price'),
-            'Volume': take('volume'),
-            'Avg Volume': take('average_volume')  # 実際に取得されるフィールド名
-        }
-        
-        # Only emit the header when there is something under it — a data_fields
-        # request that selects nothing from this section used to print a bare
-        # heading with no rows.
-        has_basic_info = any(v is not None for v in basic_info.values())
-        if has_basic_info:
-            output_lines.append("📋 Basic Information:")
-            output_lines.append("-" * 30)
-        for key, value in basic_info.items():
-            if value is not None:
-                if key == 'Price' and isinstance(value, (int, float)):
-                    output_lines.append(f"{key:15}: ${value:.2f}")
-                elif key == 'Volume' and isinstance(value, (int, float)):
-                    output_lines.append(f"{key:15}: {value:,}")
-                elif key == 'Avg Volume' and isinstance(value, (int, float)):
-                    # FinViz reports Average Volume in THOUSANDS of shares, unlike
-                    # Volume which is raw. Printing both through the same formatter
-                    # made avg look ~1000x smaller than the day's volume.
-                    output_lines.append(f"{key:15}: {value * 1e3:,.0f}")
-                elif key == 'Market Cap' and isinstance(value, (int, float)):
-                    # 時価総額データは百万ドル単位で格納されているため、百万倍してから変換
-                    actual_value = value * 1e6  # 百万ドル単位を実際の金額に変換
-                    if actual_value >= 1e12:  # 1兆以上
-                        output_lines.append(f"{key:15}: ${actual_value/1e12:.2f}T")
-                    elif actual_value >= 1e9:  # 10億以上
-                        output_lines.append(f"{key:15}: ${actual_value/1e9:.2f}B")
-                    elif actual_value >= 1e6:  # 100万以上
-                        output_lines.append(f"{key:15}: ${actual_value/1e6:.2f}M")
-                    else:
-                        output_lines.append(f"{key:15}: ${actual_value:,.0f}")
-                else:
-                    output_lines.append(f"{key:15}: {value}")
-        if has_basic_info:
-            output_lines.append("")
-
-        # バリュエーション指標 - フィールド名を修正
-        valuation_metrics = {
-            'P/E Ratio': take('p_e'),  # 実際に取得されるフィールド名
-            'Forward P/E': take('forward_p_e'),
-            'PEG': take('peg'),
-            'P/S Ratio': take('p_s'),
-            'P/B Ratio': take('p_b'),
-            'EPS': take('eps_ttm'),
-            'Dividend Yield': take('dividend_yield')
-        }
-        
-        if any(v is not None for v in valuation_metrics.values()):
-            output_lines.append("💰 Valuation Metrics:")
-            output_lines.append("-" * 30)
-            for key, value in valuation_metrics.items():
-                if value is not None:
-                    if key == 'Dividend Yield' and isinstance(value, (int, float)):
-                        output_lines.append(f"{key:15}: {value:.2f}%")
-                    elif isinstance(value, (int, float)):
-                        output_lines.append(f"{key:15}: {value:.2f}")
-                    else:
-                        output_lines.append(f"{key:15}: {value}")
-            output_lines.append("")
-        
-        # パフォーマンス指標 - フィールド名を修正
-        performance_metrics = {
-            '1 Week': take('performance_week'),  # 実際に取得されるフィールド名
-            '1 Month': take('performance_month'),  # 実際に取得されるフィールド名
-            '3 Months': take('performance_quarter'),  # 実際に取得されるフィールド名
-            '6 Months': take('performance_half_year'),  # 実際に取得されるフィールド名
-            'YTD': take('performance_ytd'),
-            '1 Year': take('performance_year')  # 実際に取得されるフィールド名
-        }
-        
-        if any(v is not None for v in performance_metrics.values()):
-            output_lines.append("📈 Performance:")
-            output_lines.append("-" * 30)
-            for key, value in performance_metrics.items():
-                if value is not None and isinstance(value, (int, float)):
-                    output_lines.append(f"{key:15}: {value:+.2f}%")
-            output_lines.append("")
-        
-        # 決算関連データ
-        earnings_data = {
-            'Earnings Date': take('earnings_date'),
-            'EPS Surprise': take('eps_surprise'),
-            'Revenue Surprise': take('revenue_surprise'),
-            'EPS Growth QoQ': take('eps_growth_quarter_over_quarter'),
-            'Sales Growth QoQ': take('sales_growth_quarter_over_quarter')
-        }
-        
-        if any(v is not None for v in earnings_data.values()):
-            output_lines.append("📊 Earnings Data:")
-            output_lines.append("-" * 30)
-            for key, value in earnings_data.items():
-                if value is not None:
-                    if key in ['EPS Surprise', 'Revenue Surprise', 'EPS Growth QoQ', 'Sales Growth QoQ'] and isinstance(value, (int, float)):
-                        output_lines.append(f"{key:15}: {value:+.2f}%")
-                    else:
-                        output_lines.append(f"{key:15}: {value}")
-            output_lines.append("")
-        
-        # テクニカル指標
-        technical_data = {
-            'RSI': take('relative_strength_index_14'),
-            'Beta': take('beta'),
-            'Volatility': take('volatility_week'),
-            'Relative Volume': take('relative_volume'),
-            '20D SMA': take_any('20_day_simple_moving_average', 'sma_20'),
-            '50D SMA': take_any('50_day_simple_moving_average', 'sma_50'),
-            '200D SMA': take_any('200_day_simple_moving_average', 'sma_200'),
-            '52W High': take('52_week_high'),
-            '52W Low': take('52_week_low'),
-            'All Time High': take('all_time_high')
-        }
-
-        if any(v is not None for v in technical_data.values()):
-            output_lines.append("🔧 Technical Indicators:")
-            output_lines.append("-" * 30)
-            for key, value in technical_data.items():
-                if value is not None:
-                    if key in ['52W High', '52W Low', 'All Time High'] and isinstance(value, (int, float)):
-                        # These FinViz columns are the percent distance of the
-                        # current price from that level, NOT a price. Printing
-                        # them with a "$" produced impossible values like a
-                        # negative 52-week high.
-                        output_lines.append(f"{key:15}: {value:+.2f}% from {'high' if 'High' in key else 'low'}")
-                    elif isinstance(value, (int, float)):
-                        output_lines.append(f"{key:15}: {value:.2f}")
-                    else:
-                        output_lines.append(f"{key:15}: {value}")
-            output_lines.append("")
-        
-        # 全フィールドの要約情報
-        # fundamental_dataが辞書かオブジェクトかを判別
-        if isinstance(fundamental_data, dict):
-            fundamental_data_dict = fundamental_data
-        else:
-            fundamental_data_dict = fundamental_data.to_dict() if hasattr(fundamental_data, 'to_dict') else dict(fundamental_data)
-            
-        # Catch-all: any populated field the curated sections above did not
-        # render. Without this, a caller passing data_fields=[...] for anything
-        # outside the ~35 hardcoded labels got a high "Data Coverage" number and
-        # no values to go with it.
-        remaining = {
-            k: v for k, v in fundamental_data_dict.items()
-            if v is not None and k not in rendered_keys
-        }
-        if remaining:
-            output_lines.append("📈 Other Fields:")
-            output_lines.append("-" * 30)
-            for key in sorted(remaining):
-                output_lines.append(f"{format_raw_field_label(key):28}: {format_raw_field_value(key, remaining[key])}")
-            output_lines.append("")
-
-        non_null_fields = sum(1 for v in fundamental_data_dict.values() if v is not None)
-        total_fields = len(fundamental_data_dict)
-
-        output_lines.extend([
-            f"📋 Data Coverage: {non_null_fields}/{total_fields} fields ({non_null_fields/total_fields*100:.1f}%)",
-            f"🔍 All Available Fields: {', '.join(sorted([k for k, v in fundamental_data_dict.items() if v is not None]))}"
-        ])
-        
-        return [TextContent(type="text", text="\n".join(output_lines))]
-        
-    except (ValueError, TypeError) as e:
-        logger.error(f"Validation error in get_stock_fundamentals: {str(e)}")
-        raise e  # Re-raise validation errors
-    except Exception as e:
-        logger.error(f"Error in get_stock_fundamentals: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
-
-@server.tool()
-def get_multiple_stocks_fundamentals(
-    tickers: List[str],
-    data_fields: Optional[List[str]] = None
-) -> List[TextContent]:
-    """
-    複数銘柄のファンダメンタルデータ一括取得（全128カラム対応）
-    
-    Args:
-        tickers: 銘柄ティッカーリスト
-        data_fields: 取得データフィールド（指定しない場合は全フィールド）
-    """
-    try:
-        if not tickers:
-            raise ValueError("No tickers provided")
-        
-        # Validate all tickers
-        invalid_tickers = [ticker for ticker in tickers if not validate_ticker(ticker)]
-        if invalid_tickers:
-            raise ValueError(f"Invalid tickers: {', '.join(invalid_tickers)}")
-        
-        # Validate data fields
-        if data_fields:
-            field_errors = validate_data_fields(data_fields)
-            if field_errors:
-                raise ValueError(f"Invalid data fields: {', '.join(field_errors)}")
-        
-        results = finviz_client.get_multiple_stocks_fundamentals(tickers, data_fields)
-        
-        if not results:
-            return [TextContent(type="text", text="No data found for any of the provided tickers.")]
-        
-        # Format output with enhanced table view
-        output_lines = [
-            f"📊 Fundamental Data for {len(results)} stocks:",
-            "=" * 80,
-            ""
-        ]
-        
-        # Create comparison table for key metrics
-        key_metrics = [
-            ('Ticker', 'ticker'),
-            ('Company', 'company'),
-            ('Sector', 'sector'),
-            ('Price', 'price'),
-            ('Market Cap', 'market_cap'),  # 実際に取得されるフィールド名
-            ('P/E', 'p_e'),  # 実際に取得されるフィールド名
-            ('Volume', 'volume'),
-            ('1D Perf', 'change'),  # 本日のパフォーマンス
-            ('1W Perf', 'performance_week'),  # 実際に取得されるフィールド名
-            ('EPS Surprise', 'eps_surprise')  # 実際に取得されるフィールド名
-        ]
-        
-        # Table header
-        header = " | ".join([f"{name:12}" for name, _ in key_metrics])
-        output_lines.append(header)
-        output_lines.append("-" * len(header))
-        
-        # Helper function to get value from result (dict or object)
-        def get_value(result, field):
-            if isinstance(result, dict):
-                return result.get(field)
-            else:
-                return getattr(result, field, None)
-        
-        # Table rows
-        for result in results:
-            row_values = []
-            for name, field in key_metrics:
-                value = get_value(result, field)
-                if value is not None:
-                    if field == 'price' and isinstance(value, (int, float)):
-                        row_values.append(f"${value:.2f}".ljust(12))
-                    elif field == 'market_cap' and isinstance(value, (int, float)):
-                        # 時価総額データは百万ドル単位で格納されているため、百万倍してから変換
-                        actual_value = value * 1e6  # 百万ドル単位を実際の金額に変換
-                        if actual_value >= 1e12:  # 1兆以上
-                            row_values.append(f"${actual_value/1e12:.1f}T".ljust(12))
-                        elif actual_value >= 1e9:  # 10億以上
-                            row_values.append(f"${actual_value/1e9:.1f}B".ljust(12))
-                        elif actual_value >= 1e6:  # 100万以上
-                            row_values.append(f"${actual_value/1e6:.1f}M".ljust(12))
-                        else:
-                            row_values.append(f"${actual_value:,.0f}".ljust(12))
-                    elif field in ['p_e', 'change', 'performance_week', 'eps_surprise'] and isinstance(value, (int, float)):
-                        if field in ['change', 'performance_week']:
-                            row_values.append(f"{value:.2f}%".ljust(12))
-                        else:
-                            row_values.append(f"{value:.2f}".ljust(12))
-                    elif field == 'volume' and isinstance(value, (int, float)):
-                        if value >= 1e6:
-                            row_values.append(f"{value/1e6:.1f}M".ljust(12))
-                        elif value >= 1e3:
-                            row_values.append(f"{value/1e3:.1f}K".ljust(12))
-                        else:
-                            row_values.append(f"{value:,.0f}".ljust(12))
-                    else:
-                        str_value = str(value)
-                        if len(str_value) > 12:
-                            str_value = str_value[:9] + "..."
-                        row_values.append(str_value.ljust(12))
-                else:
-                    row_values.append("N/A".ljust(12))
-            
-            row = " | ".join(row_values)
-            output_lines.append(row)
-        
-        output_lines.append("")
-        
-        # Detailed breakdown for each stock
-        output_lines.append("📋 Detailed Data:")
-        output_lines.append("=" * 40)
-        
-        for i, result in enumerate(results, 1):
-            ticker = get_value(result, 'ticker') or 'Unknown'
-            company = get_value(result, 'company') or 'N/A'
-            output_lines.append(f"\n{i}. {ticker} - {company}")
-            output_lines.append("-" * 50)
-            
-            # Categorized data
-            categories = {
-                "📈 Performance": [
-                    ('1D', 'change'), ('1W', 'performance_week'), ('1M', 'performance_month'), 
-                    ('3M', 'performance_quarter'), ('YTD', 'performance_ytd')
-                ],
-                "💰 Valuation": [
-                    ('P/E', 'p_e'), ('Forward P/E', 'forward_p_e'),
-                    ('PEG', 'peg'), ('P/S', 'p_s'), ('P/B', 'p_b')
-                ],
-                "📊 Earnings": [
-                    ('EPS', 'eps_ttm'), ('EPS Surprise', 'eps_surprise'),
-                    ('Revenue Surprise', 'revenue_surprise'),
-                    ('EPS Growth QoQ', 'eps_growth_quarter_over_quarter')
-                ],
-                "🔧 Technical": [
-                    ('RSI', 'relative_strength_index_14'), ('Beta', 'beta'),
-                    ('Volatility', 'volatility_week'), ('Relative Vol', 'relative_volume'),
-                    ('20D SMA', '20_day_simple_moving_average'), ('50D SMA', '50_day_simple_moving_average'),
-                    ('200D SMA', '200_day_simple_moving_average'), ('52W High', '52_week_high'),
-                    ('52W Low', '52_week_low')
-                ]
-            }
-            
-            for category, fields in categories.items():
-                values = [(name, get_value(result, field)) for name, field in fields if get_value(result, field) is not None]
-                if values:
-                    output_lines.append(f"  {category}: " + ", ".join([
-                        f"{name}={val:.2f}{'%' if 'Performance' in category or name in ['EPS Surprise', 'Revenue Surprise'] else ''}"
-                        if isinstance(val, (int, float)) else f"{name}={val}"
-                        for name, val in values
-                    ]))
-            
-            # Data coverage
-            if isinstance(result, dict):
-                result_dict = result
-            elif hasattr(result, 'to_dict'):
-                result_dict = result.to_dict()
-            else:
-                result_dict = vars(result) if hasattr(result, '__dict__') else {}
-                
-            non_null_fields = sum(1 for v in result_dict.values() if v is not None)
-            total_fields = len(result_dict)
-            output_lines.append(f"  📋 Data Coverage: {non_null_fields}/{total_fields} fields ({non_null_fields/total_fields*100:.1f}%)")
-        
-        # Summary
-        output_lines.extend([
-            "",
-            "📊 Summary:",
-            f"Total stocks processed: {len(results)}",
-            f"Average data coverage: {sum(sum(1 for v in (result if isinstance(result, dict) else result.to_dict() if hasattr(result, 'to_dict') else vars(result) if hasattr(result, '__dict__') else {}).values() if v is not None)/len(result if isinstance(result, dict) else result.to_dict() if hasattr(result, 'to_dict') else vars(result) if hasattr(result, '__dict__') else {'dummy': None}) for result in results)/len(results)*100:.1f}%"
-        ])
-        
-        return [TextContent(type="text", text="\n".join(output_lines))]
-        
-    except (ValueError, TypeError) as e:
-        logger.error(f"Validation error in get_multiple_stocks_fundamentals: {str(e)}")
-        raise e  # Re-raise validation errors
-    except Exception as e:
-        logger.error(f"Error in get_multiple_stocks_fundamentals: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+server.add_tool(get_multiple_stocks_fundamentals)
 
 @server.tool()
 def trend_reversion_screener(
@@ -727,7 +314,7 @@ def trend_reversion_screener(
         
     except Exception as e:
         logger.error(f"Error in trend_reversion_screener: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 @server.tool()
 def uptrend_screener() -> List[TextContent]:
@@ -797,7 +384,7 @@ def uptrend_screener() -> List[TextContent]:
         
     except Exception as e:
         logger.error(f"Error in uptrend_screener: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 @server.tool()
 def dividend_growth_screener(
@@ -942,7 +529,7 @@ def dividend_growth_screener(
         
     except Exception as e:
         logger.error(f"Error in dividend_growth_screener: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 @server.tool()
 def etf_screener(
@@ -994,7 +581,7 @@ def etf_screener(
         
     except Exception as e:
         logger.error(f"Error in etf_screener: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 @server.tool()
 def earnings_premarket_screener() -> List[TextContent]:
@@ -1041,7 +628,7 @@ def earnings_premarket_screener() -> List[TextContent]:
         
     except Exception as e:
         logger.error(f"Error in earnings_premarket_screener: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 @server.tool()
 def earnings_afterhours_screener() -> List[TextContent]:
@@ -1090,7 +677,7 @@ def earnings_afterhours_screener() -> List[TextContent]:
         
     except Exception as e:
         logger.error(f"Error in earnings_afterhours_screener: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 @server.tool()
 def earnings_trading_screener() -> List[TextContent]:
@@ -1154,364 +741,23 @@ def earnings_trading_screener() -> List[TextContent]:
         
     except Exception as e:
         logger.error(f"Error in earnings_trading_screener: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 
 
-@server.tool()
-def get_stock_news(
-    tickers: Union[str, List[str]],
-    days_back: int = 7,
-    news_type: Optional[str] = "all"
-) -> List[TextContent]:
-    """
-    銘柄関連ニュースの取得
-    
-    Args:
-        tickers: 銘柄ティッカー（単一文字列、カンマ区切り文字列、またはリスト）
-        days_back: 過去何日分のニュース
-        news_type: ニュースタイプ (all, earnings, analyst, insider, general)
-    """
-    try:
-        from .utils.validators import validate_tickers, parse_tickers
-        
-        # Validate tickers
-        if not validate_tickers(tickers):
-            raise ValueError(f"Invalid tickers: {tickers}")
-        
-        # Validate days_back
-        if days_back <= 0:
-            raise ValueError(f"Invalid days_back: {days_back}")
-        
-        # Parse tickers for display
-        ticker_list = parse_tickers(tickers)
-        ticker_display = ', '.join(ticker_list)
-        
-        # Get news data
-        news_list = finviz_news.get_stock_news(tickers, days_back or 7, news_type or "all")
-        
-        if not news_list:
-            return [TextContent(type="text", text=f"No news found for {ticker_display} in the last {days_back} days.")]
-        
-        # Format output
-        if len(ticker_list) == 1:
-            header = f"News for {ticker_display} (last {days_back} days):"
-        else:
-            header = f"News for {ticker_display} (last {days_back} days):"
-        
-        output_lines = [
-            header,
-            "=" * 50,
-            ""
-        ]
-        
-        for news in news_list:
-            output_lines.extend([
-                f"📰 {news.title}",
-                f"🏢 Source: {news.source}",
-                f"📅 Date: {news.date.strftime('%Y-%m-%d %H:%M')}",
-                f"🏷️ Category: {news.category}",
-                f"🔗 URL: {news.url}",
-                "-" * 40,
-                ""
-            ])
-        
-        return [TextContent(type="text", text="\n".join(output_lines))]
-        
-    except (ValueError, TypeError) as e:
-        logger.error(f"Validation error in get_stock_news: {str(e)}")
-        raise e  # Re-raise validation errors
-    except Exception as e:
-        logger.error(f"Error in get_stock_news: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+server.add_tool(get_stock_news)
 
-@server.tool()
-def get_market_news(
-    days_back: int = 3,
-    max_items: int = 20
-) -> List[TextContent]:
-    """
-    市場全体のニュースを取得
-    
-    Args:
-        days_back: 過去何日分のニュース
-        max_items: 最大取得件数
-    """
-    try:
-        # Get market news
-        news_list = finviz_news.get_market_news(days_back or 3, max_items or 20)
-        
-        if not news_list:
-            return [TextContent(type="text", text=f"No market news found in the last {days_back} days.")]
-        
-        # Format output
-        output_lines = [
-            f"Market News (last {days_back} days):",
-            "=" * 50,
-            ""
-        ]
-        
-        for news in news_list:
-            output_lines.extend([
-                f"📰 {news.title}",
-                f"🏢 Source: {news.source}",
-                f"📅 Date: {news.date.strftime('%Y-%m-%d %H:%M')}",
-                f"🏷️ Category: {news.category}",
-                f"🔗 URL: {news.url}",
-                "-" * 30,
-                ""
-            ])
-        
-        return [TextContent(type="text", text="\n".join(output_lines))]
-        
-    except Exception as e:
-        logger.error(f"Error in get_market_news: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+server.add_tool(get_market_news)
 
-@server.tool()
-def get_sector_news(
-    sector: str,
-    days_back: int = 5,
-    max_items: int = 15
-) -> List[TextContent]:
-    """
-    特定セクターのニュースを取得
-    
-    Args:
-        sector: セクター名
-        days_back: 過去何日分のニュース
-        max_items: 最大取得件数
-    """
-    try:
-        # Get sector news
-        news_list = finviz_news.get_sector_news(sector, days_back or 5, max_items or 15)
-        
-        if not news_list:
-            return [TextContent(type="text", text=f"No news found for {sector} sector in the last {days_back} days.")]
-        
-        # Format output
-        output_lines = [
-            f"{sector} Sector News (last {days_back} days):",
-            "=" * 50,
-            ""
-        ]
-        
-        for news in news_list:
-            output_lines.extend([
-                f"📰 {news.title}",
-                f"🏢 Source: {news.source}",
-                f"📅 Date: {news.date.strftime('%Y-%m-%d %H:%M')}",
-                f"🏷️ Category: {news.category}",
-                f"🔗 URL: {news.url}",
-                "-" * 30,
-                ""
-            ])
-        
-        return [TextContent(type="text", text="\n".join(output_lines))]
-        
-    except Exception as e:
-        logger.error(f"Error in get_sector_news: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+server.add_tool(get_sector_news)
 
-@server.tool()
-def get_sector_performance(
-    sectors: Optional[List[str]] = None
-) -> List[TextContent]:
-    """
-    セクター別パフォーマンス分析
-    
-    Args:
-        sectors: 対象セクター
-    """
-    try:
-        # Get sector performance data
-        sector_data = finviz_sector.get_sector_performance(sectors)
-        
-        if not sector_data:
-            return [TextContent(type="text", text="No sector performance data found.")]
-        
-        # Format output
-        output_lines = [
-            "Sector Performance Analysis:",
-            "=" * 60,
-            ""
-        ]
-        
-        # ヘッダー行を実際のカラムデータに合わせて調整
-        output_lines.extend([
-            f"{'Sector':<30} {'Market Cap':<15} {'P/E':<8} {'Div Yield':<10} {'Change':<8} {'Stocks':<6}",
-            "-" * 75
-        ])
-        
-        # データ行
-        for sector in sector_data:
-            output_lines.append(
-                f"{sector.get('name', 'N/A'):<30} "
-                f"{sector.get('market_cap', 'N/A'):<15} "
-                f"{sector.get('pe_ratio', 'N/A'):<8} "
-                f"{sector.get('dividend_yield', 'N/A'):<10} "
-                f"{sector.get('change', 'N/A'):<8} "
-                f"{sector.get('stocks', 'N/A'):<6}"
-            )
-        
-        return [TextContent(type="text", text="\n".join(output_lines))]
-        
-    except Exception as e:
-        logger.error(f"Error in get_sector_performance: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+server.add_tool(get_sector_performance)
 
-@server.tool()
-def get_industry_performance(
-    industries: Optional[List[str]] = None
-) -> List[TextContent]:
-    """
-    業界別パフォーマンス分析
-    
-    Args:
-        industries: 対象業界
-    """
-    try:
-        # Get industry performance data
-        industry_data = finviz_sector.get_industry_performance(industries)
-        
-        if not industry_data:
-            return [TextContent(type="text", text="No industry performance data found.")]
-        
-        # Format output
-        output_lines = [
-            "Industry Performance Analysis:",
-            "=" * 60,
-            ""
-        ]
-        
-        # ヘッダー行
-        output_lines.extend([
-            f"{'Industry':<40} {'Market Cap':<15} {'P/E':<8} {'Change':<8} {'Stocks':<6}",
-            "-" * 80
-        ])
-        
-        # データ行
-        for industry in industry_data:
-            output_lines.append(
-                f"{industry.get('industry', 'N/A'):<40} "
-                f"{industry.get('market_cap', 'N/A'):<15} "
-                f"{industry.get('pe_ratio', 'N/A'):<8} "
-                f"{industry.get('change', 'N/A'):<8} "
-                f"{industry.get('stocks', 'N/A'):<6}"
-            )
-        
-        return [TextContent(type="text", text="\n".join(output_lines))]
-        
-    except Exception as e:
-        logger.error(f"Error in get_industry_performance: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+server.add_tool(get_industry_performance)
 
-@server.tool()
-def get_country_performance(
-    countries: Optional[List[str]] = None
-) -> List[TextContent]:
-    """
-    国別市場パフォーマンス分析
-    
-    Args:
-        countries: 対象国
-    """
-    try:
-        # Get country performance data
-        country_data = finviz_sector.get_country_performance(countries)
-        
-        if not country_data:
-            return [TextContent(type="text", text="No country performance data found.")]
-        
-        # Format output
-        output_lines = [
-            "Country Performance Analysis:",
-            "=" * 60,
-            ""
-        ]
-        
-        # ヘッダー行
-        output_lines.extend([
-            f"{'Country':<30} {'Market Cap':<15} {'P/E':<8} {'Change':<8} {'Stocks':<6}",
-            "-" * 70
-        ])
-        
-        # データ行
-        for country in country_data:
-            output_lines.append(
-                f"{country.get('country', 'N/A'):<30} "
-                f"{country.get('market_cap', 'N/A'):<15} "
-                f"{country.get('pe_ratio', 'N/A'):<8} "
-                f"{country.get('change', 'N/A'):<8} "
-                f"{country.get('stocks', 'N/A'):<6}"
-            )
-        
-        return [TextContent(type="text", text="\n".join(output_lines))]
-        
-    except Exception as e:
-        logger.error(f"Error in get_country_performance: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+server.add_tool(get_country_performance)
 
-@server.tool()
-def get_sector_specific_industry_performance(
-    sector: str
-) -> List[TextContent]:
-    """
-    特定セクター内の業界別パフォーマンス分析
-    
-    利用可能なセクター:
-    - basicmaterials (Basic Materials)
-    - communicationservices (Communication Services) 
-    - consumercyclical (Consumer Cyclical)
-    - consumerdefensive (Consumer Defensive)
-    - energy (Energy)
-    - financial (Financial)
-    - healthcare (Healthcare)
-    - industrials (Industrials)
-    - realestate (Real Estate)
-    - technology (Technology)
-    - utilities (Utilities)
-    
-    Args:
-        sector: セクター名 (上記のセクター名から選択)
-        timeframe: 分析期間 (1d, 1w, 1m, 3m, 6m, 1y)
-    """
-    try:
-        # Get sector-specific industry performance data
-        industry_data = finviz_sector.get_sector_specific_industry_performance(sector)
-        
-        if not industry_data:
-            return [TextContent(type="text", text=f"No industry performance data found for {sector} sector.")]
-        
-        # Format output
-        sector_display = sector.replace('_', ' ').title()
-        output_lines = [
-            f"{sector_display} Sector - Industry Performance Analysis:",
-            "=" * 70,
-            ""
-        ]
-        
-        # ヘッダー行
-        output_lines.extend([
-            f"{'Industry':<45} {'Market Cap':<15} {'P/E':<8} {'Change':<8} {'Stocks':<6}",
-            "-" * 85
-        ])
-        
-        # データ行
-        for industry in industry_data:
-            output_lines.append(
-                f"{industry.get('industry', 'N/A'):<45} "
-                f"{industry.get('market_cap', 'N/A'):<15} "
-                f"{industry.get('pe_ratio', 'N/A'):<8} "
-                f"{industry.get('change', 'N/A'):<8} "
-                f"{industry.get('stocks', 'N/A'):<6}"
-            )
-        
-        return [TextContent(type="text", text="\n".join(output_lines))]
-        
-    except Exception as e:
-        logger.error(f"Error in get_sector_specific_industry_performance: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+server.add_tool(get_sector_specific_industry_performance)
 
 @server.tool()
 def get_capitalization_performance() -> List[TextContent]:
@@ -1552,403 +798,11 @@ def get_capitalization_performance() -> List[TextContent]:
         
     except Exception as e:
         logger.error(f"Error in get_capitalization_performance: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
-@server.tool()
-def get_market_overview() -> List[TextContent]:
-    """
-    市場全体の概要を取得（実際のデータ）
-    """
-    try:
-        import pandas as pd
-        
-        logger.info("Retrieving real market overview data...")
-        
-        # 主要ETFのティッカー（ユーザーが提供したデータと一致）
-        major_etfs = ['SPY', 'QQQ', 'DIA', 'IWM', 'TLT', 'GLD']
-        
-        # 1. 主要ETFの実データを一括取得（Finvizの実フィールド名使用）
-        logger.info("Fetching major ETF data using Finviz bulk API...")
-        try:
-            # 実際のFinvizレスポンスフィールドに対応
-            etf_data_bulk = finviz_client.get_multiple_stocks_fundamentals(
-                major_etfs,
-                data_fields=['ticker', 'company', 'price', 'change', 'volume', 'market_cap']
-            )
-            logger.info(f"Successfully retrieved data for {len(etf_data_bulk)} ETFs")
-        except Exception as e:
-            logger.warning(f"Bulk API failed: {e}, trying individual requests...")
-            # フォールバック：個別取得
-            etf_data_bulk = []
-            for ticker in major_etfs:
-                try:
-                    data = finviz_client.get_stock_fundamentals(
-                        ticker, 
-                        data_fields=['ticker', 'company', 'price', 'change', 'volume', 'market_cap']
-                    )
-                    etf_data_bulk.append(data)
-                except Exception as etf_error:
-                    logger.warning(f"Failed to get data for {ticker}: {etf_error}")
-                    etf_data_bulk.append({'ticker': ticker, 'error': str(etf_error)})
-        
-        # 2. 市場統計を並列取得
-        logger.info("Calculating market statistics...")
-        
-        # 出来高急増銘柄数を取得
-        try:
-            volume_surge_results = finviz_screener.volume_surge_screener()
-            volume_surge_count = len(volume_surge_results) if volume_surge_results else 0
-            # 統計計算
-            if volume_surge_results:
-                avg_rel_vol = sum([getattr(stock, 'relative_volume', 0) for stock in volume_surge_results if hasattr(stock, 'relative_volume') and stock.relative_volume]) / len(volume_surge_results)
-                avg_change = sum([getattr(stock, 'price_change', 0) for stock in volume_surge_results if hasattr(stock, 'price_change') and stock.price_change]) / len(volume_surge_results)
-            else:
-                avg_rel_vol = 0
-                avg_change = 0
-        except Exception as e:
-            logger.warning(f"Volume surge calculation failed: {e}")
-            volume_surge_count = 0
-            avg_rel_vol = 0
-            avg_change = 0
-        
-        # 上昇トレンド銘柄数を取得
-        try:
-            uptrend_results = finviz_screener.uptrend_screener()
-            uptrend_count = len(uptrend_results) if uptrend_results else 0
-            # セクター分析
-            if uptrend_results:
-                sectors_count = {}
-                for stock in uptrend_results:
-                    sector = getattr(stock, 'sector', None)
-                    if sector:
-                        sectors_count[sector] = sectors_count.get(sector, 0) + 1
-                top_sectors = dict(sorted(sectors_count.items(), key=lambda x: x[1], reverse=True)[:3])
-            else:
-                top_sectors = {}
-        except Exception as e:
-            logger.warning(f"Uptrend calculation failed: {e}")
-            uptrend_count = 0
-            top_sectors = {}
-        
-        # 決算関連統計
-        try:
-            earnings_results = finviz_screener.earnings_screener(earnings_date="this_week")
-            earnings_count = len(earnings_results) if earnings_results else 0
-        except Exception as e:
-            logger.warning(f"Earnings calculation failed: {e}")
-            earnings_count = 0
-        
-        # ETF名称マッピング（実際のFinvizと一致）
-        etf_names = {
-            'SPY': 'SPDR S&P 500 ETF Trust',
-            'QQQ': 'Invesco QQQ Trust Series 1',  
-            'DIA': 'SPDR Dow Jones Industrial Average ETF',
-            'IWM': 'iShares Russell 2000 ETF',
-            'TLT': 'iShares 20+ Year Treasury Bond ETF',
-            'GLD': 'SPDR Gold Shares ETF'
-        }
-        
-        # 出力フォーマット
-        output_lines = [
-            "🏛️ リアルタイム市場概要",
-            "=" * 70,
-            f"📅 データ取得時刻: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"📊 データソース: Finviz.com (Live Data)",
-            "",
-            "📈 主要ETF価格データ:",
-            "-" * 50
-        ]
-        
-        # ETFデータを辞書に変換（ティッカーをキーとして）
-        etf_data_dict = {}
-        
-        # 一括取得データをティッカーベースの辞書に変換
-        if isinstance(etf_data_bulk, list):
-            for data_item in etf_data_bulk:
-                if isinstance(data_item, dict):
-                    ticker_key = data_item.get('ticker')
-                    if ticker_key:
-                        etf_data_dict[ticker_key] = data_item
-                else:
-                    # オブジェクト形式の場合
-                    if hasattr(data_item, 'ticker'):
-                        ticker_key = getattr(data_item, 'ticker')
-                        if ticker_key:
-                            etf_data_dict[ticker_key] = {
-                                'ticker': getattr(data_item, 'ticker', ''),
-                                'company': getattr(data_item, 'company', ''),
-                                'price': getattr(data_item, 'price', None),
-                                'change': getattr(data_item, 'change', None),
-                                'volume': getattr(data_item, 'volume', None),
-                                'market_cap': getattr(data_item, 'market_cap', None)
-                            }
-        
-        logger.info(f"Converted {len(etf_data_dict)} ETF records to dictionary")
-        
-        # ETFデータの表示（ティッカーベースで検索）
-        for ticker in major_etfs:
-            try:
-                # 辞書からティッカーに対応するデータを取得
-                etf_data = etf_data_dict.get(ticker)
-                
-                if etf_data and not etf_data.get('error'):
-                    name = etf_names.get(ticker, ticker)
-                    
-                    # データの安全な取得
-                    def get_safe_data(key, default='N/A'):
-                        value = etf_data.get(key, default)
-                        return value if value is not None else default
-                    
-                    price = get_safe_data('price')
-                    change = get_safe_data('change')
-                    volume = get_safe_data('volume')
-                    market_cap = get_safe_data('market_cap')
-                    
-                    # フォーマット処理
-                    if isinstance(price, (int, float)):
-                        price_str = f"${price:.2f}"
-                    else:
-                        price_str = str(price)
-                    
-                    # 変動率の処理（Finvizからそのまま使用）
-                    if isinstance(change, str) and '%' in change:
-                        change_str = change  # 既に%付きの場合
-                    elif isinstance(change, (int, float)):
-                        change_str = f"{change:+.2f}%"
-                    else:
-                        change_str = str(change)
-                    
-                    # 出来高のフォーマット
-                    if isinstance(volume, (int, float)):
-                        volume_str = f"{int(volume):,}"
-                    else:
-                        volume_str = str(volume)
-                    
-                    # 時価総額のフォーマット  
-                    market_cap_str = str(market_cap) if market_cap != 'N/A' else 'N/A'
-                    
-                    # 変動方向の絵文字
-                    trend_emoji = "📈" if change_str.startswith('+') else "📉" if change_str.startswith('-') else "📊"
-                    
-                    output_lines.extend([
-                        f"🔹 {ticker} ({name})",
-                        f"   💰 価格: {price_str}  {trend_emoji} 変動: {change_str}",
-                        f"   📦 出来高: {volume_str}  💼 時価総額: {market_cap_str}",
-                        ""
-                    ])
-                else:
-                    # データが取得できない場合、個別取得を試行
-                    logger.warning(f"No data found for {ticker} in bulk result, trying individual fetch...")
-                    try:
-                        individual_data = finviz_client.get_stock_fundamentals(
-                            ticker, 
-                            data_fields=['ticker', 'company', 'price', 'change', 'volume', 'market_cap']
-                        )
-                        if individual_data:
-                            # 個別取得データの処理
-                            if hasattr(individual_data, 'ticker'):
-                                etf_data = {
-                                    'ticker': getattr(individual_data, 'ticker', ticker),
-                                    'company': getattr(individual_data, 'company', ''),
-                                    'price': getattr(individual_data, 'price', None),
-                                    'change': getattr(individual_data, 'change', None),
-                                    'volume': getattr(individual_data, 'volume', None),
-                                    'market_cap': getattr(individual_data, 'market_cap', None)
-                                }
-                                logger.info(f"Successfully retrieved individual data for {ticker}")
-                            else:
-                                etf_data = individual_data
-                        else:
-                            etf_data = None
-                    except Exception as individual_error:
-                        logger.warning(f"Individual fetch also failed for {ticker}: {individual_error}")
-                        etf_data = None
-                    
-                    # 個別取得が成功した場合、データを表示
-                    if etf_data and not etf_data.get('error'):
-                        name = etf_names.get(ticker, ticker)
-                        
-                        # データの安全な取得（個別取得版）
-                        def get_safe_data_individual(key, default='N/A'):
-                            value = etf_data.get(key, default)
-                            return value if value is not None else default
-                        
-                        price = get_safe_data_individual('price')
-                        change = get_safe_data_individual('change')
-                        volume = get_safe_data_individual('volume')
-                        market_cap = get_safe_data_individual('market_cap')
-                        
-                        # フォーマット処理
-                        if isinstance(price, (int, float)):
-                            price_str = f"${price:.2f}"
-                        else:
-                            price_str = str(price)
-                        
-                        # 変動率の処理
-                        if isinstance(change, str) and '%' in change:
-                            change_str = change
-                        elif isinstance(change, (int, float)):
-                            change_str = f"{change:+.2f}%"
-                        else:
-                            change_str = str(change)
-                        
-                        # 出来高のフォーマット
-                        if isinstance(volume, (int, float)):
-                            volume_str = f"{int(volume):,}"
-                        else:
-                            volume_str = str(volume)
-                        
-                        # 時価総額のフォーマット  
-                        market_cap_str = str(market_cap) if market_cap != 'N/A' else 'N/A'
-                        
-                        # 変動方向の絵文字
-                        trend_emoji = "📈" if change_str.startswith('+') else "📉" if change_str.startswith('-') else "📊"
-                        
-                        output_lines.extend([
-                            f"🔹 {ticker} ({name}) [個別取得]",
-                            f"   💰 価格: {price_str}  {trend_emoji} 変動: {change_str}",
-                            f"   📦 出来高: {volume_str}  💼 時価総額: {market_cap_str}",
-                            ""
-                        ])
-                    else:
-                        # 全ての取得方法が失敗した場合
-                        name = etf_names.get(ticker, ticker)
-                        error_msg = etf_data.get('error', 'データなし') if etf_data else 'データなし'
-                        output_lines.extend([
-                            f"🔹 {ticker} ({name})",
-                            f"   ⚠️ Data fetch error: {error_msg}",
-                            ""
-                        ])
-                    
-            except Exception as e:
-                logger.warning(f"Failed to process data for {ticker}: {e}")
-                output_lines.extend([
-                    f"🔹 {ticker} ({etf_names.get(ticker, ticker)})",
-                    f"   ⚠️ Data processing error: {str(e)[:30]}...",
-                    ""
-                ])
-        
-        # 市場統計の表示
-        output_lines.extend([
-            "📊 市場活動統計:",
-            "-" * 50,
-            f"🔥 出来高急増銘柄数: {volume_surge_count}銘柄",
-            f"📈 上昇トレンド銘柄数: {uptrend_count}銘柄", 
-            f"📋 今週決算発表予定: {earnings_count}銘柄",
-            ""
-        ])
-        
-        # 出来高急増銘柄の詳細統計
-        if volume_surge_count > 0:
-            output_lines.extend([
-                "🔥 出来高急増銘柄詳細:",
-                f"   📊 平均相対出来高: {avg_rel_vol:.1f}x",
-                f"   📈 平均価格変動: +{avg_change:.1f}%",
-                ""
-            ])
-        
-        # 上昇トレンド主要セクター
-        if top_sectors:
-            output_lines.extend([
-                "📈 上昇トレンド主要セクター:",
-            ])
-            for sector, count in top_sectors.items():
-                output_lines.append(f"   🏢 {sector}: {count}銘柄")
-            output_lines.append("")
-        
-        output_lines.extend([
-            "=" * 70,
-            "💡 詳細分析には以下の機能をご利用ください:",
-            "🔍 get_stock_fundamentals - 個別銘柄詳細データ",
-            "🔥 volume_surge_screener - 出来高急増銘柄詳細",
-            "📈 uptrend_screener - 上昇トレンド銘柄詳細",
-            "🏢 get_sector_performance - セクター別パフォーマンス分析",
-            "",
-            f"🌐 データソース: Finviz Elite (https://elite.finviz.com/)",
-            f"⏰ 最終更新: {pd.Timestamp.now().strftime('%H:%M:%S')}"
-        ])
-        
-        return [TextContent(type="text", text="\n".join(output_lines))]
-        
-    except Exception as e:
-        logger.error(f"Error in get_market_overview: {str(e)}")
-        return [TextContent(type="text", text=f"❌ 市場概要の取得に失敗しました: {str(e)}")]
+server.add_tool(get_market_overview)
 
-@server.tool()
-def get_relative_volume_stocks(
-    min_relative_volume: Any,
-    min_price: Optional[Union[int, float, str]] = None,
-    sectors: Optional[List[str]] = None,
-    max_results: int = 50
-) -> List[TextContent]:
-    """
-    相対出来高異常銘柄の検出
-    
-    Args:
-        min_relative_volume: 最低相対出来高
-        min_price: 最低株価
-        sectors: 対象セクター
-        max_results: 最大取得件数
-    """
-    try:
-        # Build screening parameters
-        params = {
-            'min_relative_volume': min_relative_volume,
-            'min_price': min_price,
-            'sectors': sectors or [],
-            'max_results': max_results or 50
-        }
-        
-        # Use volume surge screener as the base
-        results = finviz_screener.screen_stocks({
-            'relative_volume_min': min_relative_volume,
-            'price_min': min_price,
-            'sectors': sectors or []
-        })
-        
-        # Sort by relative volume
-        results.sort(key=lambda x: x.relative_volume or 0, reverse=True)
-        results = results[:max_results or 50]
-        
-        if not results:
-            return [TextContent(type="text", text=f"No stocks found with relative volume >= {min_relative_volume}x.")]
-        
-        # Format output
-        output_lines = [
-            f"High Relative Volume Stocks (>= {min_relative_volume}x):",
-            "=" * 60,
-            ""
-        ]
-        
-        # ヘッダー行
-        output_lines.extend([
-            f"{'Ticker':<8} {'Company':<25} {'Price':<8} {'Change%':<8} {'Volume':<12} {'Rel Vol':<8}",
-            "-" * 70
-        ])
-        
-        # データ行
-        for stock in results:
-            company_short = (stock.company_name[:22] + "...") if stock.company_name and len(stock.company_name) > 25 else (stock.company_name or "N/A")
-            
-            output_lines.append(
-                f"{stock.ticker:<8} "
-                f"{company_short:<25} "
-                f"${stock.price:<7.2f} " if stock.price else f"{'N/A':<8} "
-                f"{stock.price_change:>7.2f}% " if stock.price_change else f"{'N/A':<8} "
-                f"{stock.volume:>11,} " if stock.volume else f"{'N/A':<12} "
-                f"{stock.relative_volume:>7.2f}x" if stock.relative_volume else f"{'N/A':<8}"
-            )
-        
-        output_lines.extend([
-            "",
-            f"Found {len(results)} stocks with unusual volume activity."
-        ])
-        
-        return [TextContent(type="text", text="\n".join(output_lines))]
-        
-    except Exception as e:
-        logger.error(f"Error in get_relative_volume_stocks: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+server.add_tool(get_relative_volume_stocks)
 
 @server.tool()
 def technical_analysis_screener(
@@ -2051,7 +905,7 @@ def technical_analysis_screener(
         
     except Exception as e:
         logger.error(f"Error in technical_analysis_screener: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 def cli_main():
     """CLI entry point - supports stdio (default) and sse transport for Docker"""
@@ -2179,7 +1033,7 @@ def earnings_winners_screener(
         
     except Exception as e:
         logger.error(f"Error in earnings_winners_screener: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 @server.tool()
 def upcoming_earnings_screener(
@@ -2324,7 +1178,7 @@ def upcoming_earnings_screener(
         
     except Exception as e:
         logger.error(f"Error in upcoming_earnings_screener: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 def _format_earnings_winners_list(results: List, params: Dict[str, Any]) -> List[str]:
     """決算後上昇銘柄をリスト形式でフォーマット"""
@@ -2997,7 +1851,7 @@ def get_sec_filings(
         raise e
     except Exception as e:
         logger.error(f"Error in get_sec_filings: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 @server.tool()
 def get_major_sec_filings(
@@ -3067,7 +1921,7 @@ def get_major_sec_filings(
         raise e
     except Exception as e:
         logger.error(f"Error in get_major_sec_filings: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 @server.tool()
 def get_insider_sec_filings(
@@ -3134,7 +1988,7 @@ def get_insider_sec_filings(
         raise e
     except Exception as e:
         logger.error(f"Error in get_insider_sec_filings: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 @server.tool()
 def get_sec_filing_summary(
@@ -3200,164 +2054,11 @@ def get_sec_filing_summary(
         raise e
     except Exception as e:
         logger.error(f"Error in get_sec_filing_summary: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
-@server.tool()
-def get_edgar_filing_content(
-    ticker: str,
-    accession_number: str,
-    primary_document: str,
-    max_length: int = 50000
-) -> List[TextContent]:
-    """
-    EDGAR API経由でSECファイリングドキュメント内容を取得
-    
-    Args:
-        ticker: 銘柄ティッカー
-        accession_number: SEC accession number (with dashes)
-        primary_document: Primary document filename
-        max_length: 最大コンテンツ長 (デフォルト: 50,000文字)
-    """
-    try:
-        # Validate ticker
-        if not validate_ticker(ticker):
-            raise ValueError(f"Invalid ticker: {ticker}")
-        
-        logger.info(f"Fetching EDGAR document content for {ticker}: {accession_number}/{primary_document}")
-        
-        # Get document content via EDGAR API
-        content_data = edgar_client.get_filing_document_content(
-            ticker=ticker,
-            accession_number=accession_number,
-            primary_document=primary_document,
-            max_length=max_length
-        )
-        
-        if content_data.get('status') == 'error':
-            return [TextContent(type="text", text=f"Error: {content_data.get('error', 'Unknown error')}")]
-        
-        # Format output
-        metadata = content_data.get('metadata', {})
-        content = content_data.get('content', '')
-        
-        output_lines = [
-            f"📄 SEC Filing Document Content for {ticker}:",
-            f"🔗 Document: {accession_number}/{primary_document}",
-            f"📅 Retrieved: {metadata.get('retrieved_at', 'N/A')}",
-            f"📊 Content Length: {metadata.get('content_length', 0):,} characters",
-            "=" * 80,
-            "",
-            content[:max_length] if len(content) > max_length else content
-        ]
-        
-        if len(content) > max_length:
-            output_lines.extend([
-                "",
-                "=" * 80,
-                f"[Content truncated - showing first {max_length:,} characters]"
-            ])
-        
-        return [TextContent(type="text", text="\n".join(output_lines))]
-        
-    except (ValueError, TypeError) as e:
-        logger.error(f"Validation error in get_edgar_filing_content: {str(e)}")
-        raise e
-    except Exception as e:
-        logger.error(f"Error in get_edgar_filing_content: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+server.add_tool(get_edgar_filing_content)
 
-@server.tool()
-def get_multiple_edgar_filing_contents(
-    ticker: str,
-    filings_data: List[Dict[str, str]],
-    max_length: int = 20000
-) -> List[TextContent]:
-    """
-    複数のSECファイリングドキュメント内容をEDGAR API経由で一括取得
-    
-    Args:
-        ticker: 銘柄ティッカー
-        filings_data: ファイリングデータのリスト [{"accession_number": "...", "primary_document": "..."}]
-        max_length: 各ドキュメントの最大コンテンツ長 (デフォルト: 20,000文字)
-    """
-    try:
-        # Validate ticker
-        if not validate_ticker(ticker):
-            raise ValueError(f"Invalid ticker: {ticker}")
-        
-        if not filings_data:
-            return [TextContent(type="text", text="No filing data provided.")]
-        
-        logger.info(f"Fetching {len(filings_data)} EDGAR document contents for {ticker}")
-        
-        # Prepare filing data with ticker
-        filings_with_ticker = []
-        for filing in filings_data:
-            filing_copy = filing.copy()
-            filing_copy['ticker'] = ticker
-            filings_with_ticker.append(filing_copy)
-        
-        # Get multiple document contents via EDGAR API
-        results = edgar_client.get_multiple_filing_contents(
-            filings_data=filings_with_ticker,
-            max_length=max_length
-        )
-        
-        if not results:
-            return [TextContent(type="text", text=f"No document contents retrieved for {ticker}.")]
-        
-        # Format output
-        output_lines = [
-            f"📄 Multiple SEC Filing Document Contents for {ticker}:",
-            f"📊 Retrieved: {len(results)} documents",
-            "=" * 80,
-            ""
-        ]
-        
-        for i, result in enumerate(results, 1):
-            metadata = result.get('metadata', {})
-            content = result.get('content', '')
-            status = result.get('status', 'unknown')
-            
-            output_lines.extend([
-                f"📋 Document {i}/{len(results)}:",
-                f"   📄 File: {metadata.get('accession_number', 'N/A')}/{metadata.get('primary_document', 'N/A')}",
-                f"   📅 Retrieved: {metadata.get('retrieved_at', 'N/A')}",
-                f"   📊 Length: {metadata.get('content_length', 0):,} characters",
-                f"   ✅ Status: {status}",
-                ""
-            ])
-            
-            if status == 'error':
-                error_msg = result.get('error', 'Unknown error')
-                output_lines.extend([
-                    f"   ❌ Error: {error_msg}",
-                    ""
-                ])
-            else:
-                # Show first 500 characters of content
-                preview_length = min(500, len(content))
-                preview = content[:preview_length]
-                output_lines.extend([
-                    f"   📝 Content Preview ({preview_length} chars):",
-                    f"   {preview}",
-                    ""
-                ])
-                
-                if len(content) > preview_length:
-                    output_lines.append(f"   [... {len(content) - preview_length:,} more characters]")
-                    output_lines.append("")
-            
-            output_lines.extend(["-" * 60, ""])
-        
-        return [TextContent(type="text", text="\n".join(output_lines))]
-        
-    except (ValueError, TypeError) as e:
-        logger.error(f"Validation error in get_multiple_edgar_filing_contents: {str(e)}")
-        raise e
-    except Exception as e:
-        logger.error(f"Error in get_multiple_edgar_filing_contents: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+server.add_tool(get_multiple_edgar_filing_contents)
 
 @server.tool()
 def get_edgar_company_filings(
@@ -3448,7 +2149,7 @@ def get_edgar_company_filings(
         raise e
     except Exception as e:
         logger.error(f"Error in get_edgar_company_filings: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 @server.tool()
 def get_edgar_company_facts(
@@ -3535,7 +2236,7 @@ def get_edgar_company_facts(
         raise e
     except Exception as e:
         logger.error(f"Error in get_edgar_company_facts: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 @server.tool()
 def get_edgar_company_concept(
@@ -3639,7 +2340,7 @@ def get_edgar_company_concept(
         raise e
     except Exception as e:
         logger.error(f"Error in get_edgar_company_concept: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 
 # Register Field Discovery Tools
@@ -3911,97 +2612,7 @@ def custom_screener(
 
     except Exception as e:
         logger.error(f"Error in custom_screener: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        raise ToolError(str(e)) from e
 
 
-@server.tool()
-def get_options_chain(
-    ticker: str,
-    option_type: str = "call",
-    expiration: Optional[str] = None,
-) -> List[TextContent]:
-    """
-    Get options chain for a stock (calls or puts).
-
-    Returns real-time bid/ask, last price, volume, open interest, IV, and
-    Greeks (delta, gamma, theta, vega, rho) for each contract.
-
-    Args:
-        ticker: Stock ticker symbol (e.g. AAPL, MSFT).
-        option_type: 'call' or 'put' (default: call).
-        expiration: Expiration date as YYYY-MM-DD. If omitted, returns all
-                    expirations (can be thousands of contracts).
-    """
-    try:
-        if not validate_ticker(ticker):
-            raise ValueError(f"Invalid ticker: {ticker}")
-
-        if option_type not in ("call", "put"):
-            raise ValueError(f"option_type must be 'call' or 'put', got: {option_type}")
-
-        contracts = finviz_options.get_options_chain(
-            ticker, option_type=option_type, expiration=expiration,
-        )
-
-        if not contracts:
-            return [TextContent(
-                type="text",
-                text=f"No {option_type} options found for {ticker.upper()}"
-                     + (f" expiring {expiration}" if expiration else ""),
-            )]
-
-        lines = [
-            f"Options Chain: {ticker.upper()} {option_type.upper()}S"
-            + (f" (exp {expiration})" if expiration else ""),
-            "=" * 70,
-            "",
-        ]
-
-        for c in contracts:
-            strike = c.get("strike")
-            bid = c.get("bid")
-            ask = c.get("ask")
-            last_close = c.get("last_close")
-            vol = c.get("volume")
-            oi = c.get("open_interest")
-            iv = c.get("iv")
-            delta = c.get("delta")
-            change = c.get("change")
-            change_pct = c.get("change_pct")
-            exp = c.get("expiration")
-
-            strike_str = f"${strike}" if strike is not None else "N/A"
-            bid_str = f"${bid:.2f}" if isinstance(bid, (int, float)) else "N/A"
-            ask_str = f"${ask:.2f}" if isinstance(ask, (int, float)) else "N/A"
-            last_str = f"${last_close:.2f}" if isinstance(last_close, (int, float)) else "N/A"
-            vol_str = f"{int(vol):,}" if isinstance(vol, (int, float)) else "-"
-            oi_str = f"{int(oi):,}" if isinstance(oi, (int, float)) else "-"
-            iv_str = f"{iv}" if iv is not None else "-"
-            delta_str = f"{delta}" if delta is not None else "-"
-            change_str = ""
-            if change is not None:
-                change_str = f" | Chg: ${change}"
-            if change_pct is not None:
-                change_str += f" ({change_pct})"
-            exp_str = f" [exp {exp}]" if exp is not None else ""
-
-            lines.append(f"Strike {strike_str}{exp_str} | Bid: {bid_str} | Ask: {ask_str} | Last: {last_str}{change_str}")
-            lines.append(f"  Vol: {vol_str} | OI: {oi_str} | IV: {iv_str} | Delta: {delta_str}")
-
-            # Additional Greeks on a third line if present
-            greeks = []
-            for g in ("gamma", "theta", "vega", "rho"):
-                val = c.get(g)
-                if val is not None:
-                    greeks.append(f"{g.capitalize()}: {val}")
-            if greeks:
-                lines.append(f"  {' | '.join(greeks)}")
-
-            lines.append("")
-
-        lines.append(f"Total contracts: {len(contracts)}")
-        return [TextContent(type="text", text="\n".join(lines))]
-
-    except Exception as e:
-        logger.error(f"Error in get_options_chain: {str(e)}")
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+server.add_tool(get_options_chain)

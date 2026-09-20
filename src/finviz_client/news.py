@@ -1,3 +1,4 @@
+from mcp.server.fastmcp.exceptions import ToolError
 import logging
 from typing import List, Optional, Union
 from datetime import datetime, timedelta
@@ -72,6 +73,8 @@ class FinvizNewsClient(FinvizClient):
                     news_data = self._parse_news_from_csv(row, primary_ticker, cutoff_date)
                     if news_data:
                         news_list.append(news_data)
+                except ToolError:
+                    raise
                 except Exception as e:
                     logger.warning(f"Failed to parse news data from CSV: {e}")
                     continue
@@ -79,6 +82,8 @@ class FinvizNewsClient(FinvizClient):
             logger.info(f"Retrieved {len(news_list)} news items for {ticker_list}")
             return news_list
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error retrieving news for {tickers}: {e}")
             return []
@@ -117,6 +122,8 @@ class FinvizNewsClient(FinvizClient):
                         news_list.append(news_data)
                         if len(news_list) >= max_items:
                             break
+                except ToolError:
+                    raise
                 except Exception as e:
                     logger.warning(f"Failed to parse market news data from CSV: {e}")
                     continue
@@ -124,6 +131,8 @@ class FinvizNewsClient(FinvizClient):
             logger.info(f"Retrieved {len(news_list)} market news items")
             return news_list
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error retrieving market news: {e}")
             return []
@@ -165,6 +174,8 @@ class FinvizNewsClient(FinvizClient):
                         news_list.append(news_data)
                         if len(news_list) >= max_items:
                             break
+                except ToolError:
+                    raise
                 except Exception as e:
                     logger.warning(f"Failed to parse sector news data from CSV: {e}")
                     continue
@@ -172,6 +183,8 @@ class FinvizNewsClient(FinvizClient):
             logger.info(f"Retrieved {len(news_list)} news items for {sector} sector")
             return news_list
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error retrieving news for {sector} sector: {e}")
             return []
@@ -235,6 +248,8 @@ class FinvizNewsClient(FinvizClient):
             # その他の形式（デフォルトで現在時刻）
             return datetime.now()
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.warning(f"Failed to parse date '{date_text}': {e}")
             return datetime.now()
@@ -315,7 +330,7 @@ class FinvizNewsClient(FinvizClient):
             # 必要なフィールドを抽出
             title = str(row.get('Title', ''))
             source = str(row.get('Source', ''))
-            url = str(row.get('URL', ''))
+            url = next((str(row[k]) for k in ('URL','Url','Link','link') if k in row and pd.notna(row[k]) and str(row[k]).strip()), None)
             
             # 日時の解析
             date_str = str(row.get('Date', ''))
@@ -336,6 +351,8 @@ class FinvizNewsClient(FinvizClient):
                 category=category
             )
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.warning(f"Failed to parse news data from CSV row: {e}")
             return None
@@ -368,6 +385,8 @@ class FinvizNewsClient(FinvizClient):
             logger.warning(f"Could not parse date string: {date_str}")
             return None
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.warning(f"Error parsing date '{date_str}': {e}")
             return None

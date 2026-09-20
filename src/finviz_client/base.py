@@ -1,4 +1,6 @@
+from mcp.server.fastmcp.exceptions import ToolError
 import requests
+from ..agent_contracts import provider_error
 import pandas as pd
 import time
 import logging
@@ -9,6 +11,7 @@ import os
 from dotenv import load_dotenv
 
 from ..models import StockData, FINVIZ_FIELD_MAPPING
+from ..constants import FINVIZ_COMPREHENSIVE_FIELD_MAPPING
 
 # 環境変数の読み込み
 load_dotenv()
@@ -44,7 +47,7 @@ class FinvizClient:
 
     
     def _make_request(self, url: str, params: Optional[Dict[str, Any]] = None, 
-                     retries: int = 3) -> requests.Response:
+                     retries: int = 1) -> requests.Response:
         """
         HTTPリクエストを実行
         
@@ -61,16 +64,18 @@ class FinvizClient:
                 # レート制限対応
                 time.sleep(self.rate_limit_delay)
                 
-                response = self.session.get(url, params=params, timeout=30)
+                response = self.session.get(url, params=params, timeout=15)
                 response.raise_for_status()
                 
                 logger.debug(f"Request successful: {url}")
                 return response
                 
             except requests.exceptions.RequestException as e:
-                logger.warning(f"Request failed (attempt {attempt + 1}/{retries}): {e}")
+                # Exception URLs may contain API keys; emit only sanitized errors.
+                if isinstance(e, requests.HTTPError) and e.response is not None and e.response.status_code in (401,403,429):
+                    raise provider_error(e) from e
                 if attempt == retries - 1:
-                    raise
+                    raise provider_error(e) from e
                 time.sleep(2 ** attempt)  # 指数バックオフ
         
         raise Exception("Max retries exceeded")
@@ -267,6 +272,8 @@ class FinvizClient:
             logger.info(f"Successfully retrieved data for {ticker}")
             return stock_data
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error retrieving data for {ticker}: {e}")
             return None
@@ -305,6 +312,8 @@ class FinvizClient:
                     if total_rows > 100 and (idx + 1) % log_interval == 0:
                         logger.info(f"Processing stocks: {idx + 1}/{total_rows} ({((idx + 1)/total_rows*100):.1f}%)")
                         
+                except ToolError:
+                    raise
                 except Exception as e:
                     logger.warning(f"Failed to parse stock data from CSV row {idx + 1}: {e}")
                     continue
@@ -312,6 +321,8 @@ class FinvizClient:
             logger.info(f"Successfully screened {len(stocks)} stocks using CSV export")
             return stocks
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error in stock screening: {e}")
             return []
@@ -370,6 +381,8 @@ class FinvizClient:
                 try:
                     stock_data = self._parse_stock_data_from_csv(row)
                     stocks.append(stock_data)
+                except ToolError:
+                    raise
                 except Exception as e:
                     logger.warning(f"Failed to parse stock data from raw CSV row: {e}")
                     continue
@@ -377,6 +390,8 @@ class FinvizClient:
             logger.info(f"Successfully screened {len(stocks)} stocks using raw filters")
             return stocks
 
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error in raw stock screening: {e}")
             return []
@@ -1079,6 +1094,8 @@ class FinvizClient:
             logger.warning(f"Unsupported date format: {date_str}")
             return None
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error formatting date {date_str}: {e}")
             return None
@@ -1154,6 +1171,8 @@ class FinvizClient:
             
             return df
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error fetching CSV data: {e}")
             return pd.DataFrame()
@@ -1478,12 +1497,14 @@ class FinvizClient:
             if response.text.startswith('<!DOCTYPE html>') or '<html' in response.text.lower():
                 logger.error(f"Received HTML instead of CSV from {export_url}")
                 logger.error("This may indicate authentication or parameter issues")
-                return pd.DataFrame()
+                raise ValueError('UPSTREAM_AUTH: HTML instead of CSV; check provider access')
             
             # CSV形式かどうかを確認
             if not response.text.strip():
                 logger.error(f"Empty response from {export_url}")
-                return pd.DataFrame()
+                raise ValueError('UPSTREAM_UNAVAILABLE: empty CSV response')
+            if len(response.content)>8*1024*1024:
+                raise ValueError('PROVIDER_CONTRACT: CSV response exceeds 8 MiB')
             
             # CSVをDataFrameに変換
             from io import StringIO
@@ -1492,9 +1513,10 @@ class FinvizClient:
             
             return df
             
+        except ToolError:
+            raise
         except Exception as e:
-            logger.error(f"Error fetching CSV data from {export_url}: {e}")
-            return pd.DataFrame()
+            raise provider_error(e) from e
     
     def get_stock_fundamentals(self, ticker: str, data_fields: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
         """
@@ -1550,7 +1572,7 @@ class FinvizClient:
                     # 数値フィールドの変換処理
                     numeric_keywords = ['price', 'volume', 'ratio', 'margin', 'growth', 'return', 'debt', 'shares', 'cash', 'income', 'sales', 'eps', 'dividend', 'beta', 'avg', 'high', 'low', 'change', 'float', 'cap', 'pe', 'pb', 'ps']
                     
-                    is_numeric = any(keyword in field_name for keyword in numeric_keywords) or any(keyword in col.lower() for keyword in numeric_keywords)
+                    is_numeric = '/' in col or any(keyword in field_name for keyword in numeric_keywords) or any(keyword in col.lower() for keyword in numeric_keywords)
                     
                     if is_numeric:
                         converted_value = self._clean_numeric_value(str(value))
@@ -1580,7 +1602,7 @@ class FinvizClient:
                 filtered_result = {}
                 for field in data_fields:
                     # エイリアスがあるか確認
-                    actual_field = field_aliases.get(field, field)
+                    actual_field = FINVIZ_COMPREHENSIVE_FIELD_MAPPING.get(field, {}).get('csv_name', field_aliases.get(field, field))
                     
                     # フィールド名の正規化
                     normalized_field = actual_field.lower().replace(' ', '_').replace('/', '_').replace('(', '').replace(')', '').replace('.', '').replace('-', '_').replace('%', 'percent')
@@ -1606,6 +1628,8 @@ class FinvizClient:
             # すべての利用可能フィールドを返す
             return result
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error getting fundamentals for {ticker}: {e}")
             return None
@@ -1684,7 +1708,7 @@ class FinvizClient:
                             # 数値フィールドの変換処理
                             numeric_keywords = ['price', 'volume', 'ratio', 'margin', 'growth', 'return', 'debt', 'shares', 'cash', 'income', 'sales', 'eps', 'dividend', 'beta', 'avg', 'high', 'low', 'change', 'float', 'cap', 'pe', 'pb', 'ps']
                             
-                            is_numeric = any(keyword in field_name for keyword in numeric_keywords) or any(keyword in col.lower() for keyword in numeric_keywords)
+                            is_numeric = '/' in col or any(keyword in field_name for keyword in numeric_keywords) or any(keyword in col.lower() for keyword in numeric_keywords)
                             
                             if is_numeric:
                                 converted_value = self._clean_numeric_value(str(value))
@@ -1723,7 +1747,7 @@ class FinvizClient:
                         filtered_result = {'ticker': result['ticker']}  # 常にtickerは含める
                         for field in data_fields:
                             # エイリアスがあるか確認
-                            actual_field = field_aliases.get(field, field)
+                            actual_field = FINVIZ_COMPREHENSIVE_FIELD_MAPPING.get(field, {}).get('csv_name', field_aliases.get(field, field))
                             
                             # フィールド名の正規化
                             normalized_field = actual_field.lower().replace(' ', '_').replace('/', '_').replace('(', '').replace(')', '').replace('.', '').replace('-', '_').replace('%', 'percent')
@@ -1749,6 +1773,8 @@ class FinvizClient:
                         # すべての利用可能フィールドを返す
                         results.append(result)
                     
+                except ToolError:
+                    raise
                 except Exception as e:
                     logger.warning(f"Error processing row {idx}: {e}")
                     # エラーの場合でも基本情報は返す
@@ -1766,6 +1792,8 @@ class FinvizClient:
             logger.info(f"Successfully processed {len(results)} stocks out of {len(tickers)} requested")
             return results
         
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error in bulk fundamentals retrieval: {e}")
             logger.info("Falling back to individual ticker fetching...")
@@ -1787,6 +1815,8 @@ class FinvizClient:
                     # レート制限対応
                     time.sleep(0.2)
                     
+                except ToolError:
+                    raise
                 except Exception as individual_error:
                     logger.warning(f"Failed to get fundamentals for {ticker}: {individual_error}")
                     # エラーの場合でも基本情報は返す
@@ -1833,6 +1863,8 @@ class FinvizClient:
             
             return overview
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error getting market overview: {e}")
             return {'error': str(e)}

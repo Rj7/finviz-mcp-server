@@ -110,7 +110,9 @@ class EdgarAPIClient:
             primary_documents = recent_filings.get('primaryDocument', [])
             descriptions = recent_filings.get('primaryDocDescription', [])
             
-            for i in range(min(len(forms), max_count)):
+            for i in range(len(forms)):
+                if len(filings) >= max_count:
+                    break
                 form = forms[i]
                 filing_date = filing_dates[i] if i < len(filing_dates) else ''
                 report_date = report_dates[i] if i < len(report_dates) else ''
@@ -160,7 +162,8 @@ class EdgarAPIClient:
         ticker: str,
         accession_number: str,
         primary_document: str,
-        max_length: int = 50000
+        max_length: int = 4000,
+        cursor: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Get SEC filing document content via EDGAR API
@@ -175,6 +178,11 @@ class EdgarAPIClient:
             Dictionary with document content and metadata
         """
         try:
+            from ..agent_contracts import digest, page_position, page_info
+            if not 1 <= max_length <= 8000:
+                raise ValueError('INVALID_ARGUMENT: max_length must be 1–8000')
+            if not validate_ticker(ticker) or not primary_document or any(c in primary_document for c in '/\\?#') or not accession_number.replace('-', '').isdigit():
+                raise ValueError('INVALID_ARGUMENT: use exact accession and primary document from discovery')
             logger.info(f"Fetching document content for {ticker}: {accession_number}/{primary_document}")
             
             # Get CIK from ticker
@@ -194,15 +202,24 @@ class EdgarAPIClient:
             
             # Fetch document content with rate limiting
             time.sleep(0.1)  # SEC API rate limit compliance
-            response = self.session.get(document_url, timeout=30)
+            response = self.session.get(document_url, timeout=15)
             response.raise_for_status()
             
-            # Extract text content
-            content = response.text
+            # Remove non-visible HTML before applying the text limit. Inline XBRL
+            # values and table cells remain visible in document order.
+            from bs4 import BeautifulSoup
+            document = BeautifulSoup(response.text, 'html.parser')
+            for node in document.find_all(['head', 'script', 'style', 'noscript', 'ix:hidden']):
+                node.decompose()
+            content = document.get_text('\n', strip=True)
+            snapshot=digest(content)
+            query={'ticker':ticker.upper(),'accession_number':accession_number,'primary_document':primary_document}
+            offset=page_position('filing',query,snapshot,cursor)
+            if offset>len(content): raise ValueError('INVALID_CURSOR: position exceeds document')
+            total=len(content)
             
             # Apply length limit
-            if len(content) > max_length:
-                content = content[:max_length] + "\n\n[Content truncated due to length limit]"
+            content = content[offset:offset+max_length]
             
             metadata = {
                 'ticker': ticker,
@@ -220,16 +237,17 @@ class EdgarAPIClient:
                 'content': content,
                 'metadata': metadata,
                 'status': 'success',
+                'page': page_info('filing',query,snapshot,offset,len(content),total),
                 'url': document_url
             }
             
         except requests.RequestException as e:
-            logger.error(f"Network error fetching document: {e}")
+            from ..agent_contracts import provider_error
             return {
                 'content': '',
                 'metadata': {},
                 'status': 'error',
-                'error': f'Network error: {str(e)}'
+                'error': str(provider_error(e))
             }
         except Exception as e:
             logger.error(f"Error fetching document content: {e}")
@@ -327,4 +345,4 @@ class EdgarAPIClient:
             
         except Exception as e:
             logger.error(f"Error fetching concept {concept} for {ticker}: {e}")
-            return {'error': str(e)} 
+            return {'error': str(e)}

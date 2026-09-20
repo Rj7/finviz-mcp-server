@@ -1,12 +1,14 @@
 """Finviz Elite options chain client."""
 
 import logging
+import re
 from io import StringIO
 from typing import Dict, List, Optional, Any
 
 import pandas as pd
 
 from .base import FinvizClient
+from ..agent_contracts import provider_error
 
 logger = logging.getLogger(__name__)
 
@@ -48,19 +50,24 @@ class FinvizOptionsClient(FinvizClient):
         # Options endpoint doesn't use ft=4 like the screener exports,
         # so we make the request directly instead of using _fetch_csv_from_url.
         try:
-            response = self._make_request(OPTIONS_EXPORT_URL, params)
+            response = self._make_request(OPTIONS_EXPORT_URL, params, retries=1)
 
             if response.text.startswith("<!DOCTYPE html>") or "<html" in response.text.lower():
                 logger.error("Received HTML instead of CSV from options endpoint")
-                return []
+                raise ValueError('UPSTREAM_AUTH: options endpoint returned HTML instead of CSV')
             if not response.text.strip():
                 logger.error("Empty response from options endpoint")
-                return []
+                raise ValueError('UPSTREAM_UNAVAILABLE: empty options response')
+
+            if len(response.text.encode('utf-8')) > 8 * 1024 * 1024:
+                raise ValueError('PROVIDER_CONTRACT: options response exceeds 8 MiB; specify expiration')
 
             df = pd.read_csv(StringIO(response.text))
         except Exception as e:
-            logger.error(f"Error fetching options chain: {e}")
-            return []
+            raise provider_error(e) from e
+
+        if 'Strike' not in df.columns or not ({'Type', 'Contract Name'} & set(df.columns)):
+            raise ValueError('PROVIDER_CONTRACT: options CSV lacks contract side/identity columns')
 
         if df.empty:
             return []
@@ -99,4 +106,18 @@ class FinvizOptionsClient(FinvizClient):
             for k, v in rec.items():
                 if pd.isna(v):
                     rec[k] = None
-        return records
+            declared = str(rec.get('type') or '').strip().lower()
+            side = {'c':'call','p':'put','calls':'call','puts':'put','call':'call','put':'put'}.get(declared)
+            identity = re.search(r'(\d{6})([CP])\d{8}$', str(rec.get('contract') or ''))
+            if identity:
+                identified = 'call' if identity.group(2) == 'C' else 'put'
+                if side and side != identified:
+                    raise ValueError('PROVIDER_CONTRACT: conflicting contract side and identifier')
+                side = identified
+                rec['expiration'] = rec.get('expiration') or f'20{identity.group(1)[:2]}-{identity.group(1)[2:4]}-{identity.group(1)[4:]}'
+            if not side:
+                raise ValueError('PROVIDER_CONTRACT: cannot establish option side; refusing a mixed or mislabeled chain')
+            rec['type'] = side
+            rec['expiration'] = rec.get('expiration') or expiration
+            rec['as_of'] = rec.get('last_trade_time')
+        return [r for r in records if r['type'] == option_type and (not expiration or r['expiration'] == expiration)]

@@ -1,3 +1,4 @@
+from mcp.server.fastmcp.exceptions import ToolError
 import logging
 from typing import List, Optional, Dict, Any
 import pandas as pd
@@ -59,6 +60,8 @@ class FinvizSectorAnalysisClient(FinvizClient):
                     sector_perf = self._parse_sector_performance_from_csv(row)
                     if sector_perf:
                         sector_data.append(sector_perf)
+                except ToolError:
+                    raise
                 except Exception as e:
                     logger.warning(f"Failed to parse sector performance from CSV: {e}")
                     continue
@@ -70,6 +73,8 @@ class FinvizSectorAnalysisClient(FinvizClient):
             logger.info(f"Retrieved performance data for {len(sector_data)} sectors")
             return sector_data
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error retrieving sector performance: {e}")
             return []
@@ -106,6 +111,8 @@ class FinvizSectorAnalysisClient(FinvizClient):
                     industry_perf = self._parse_industry_performance_from_csv(row)
                     if industry_perf:
                         industry_data.append(industry_perf)
+                except ToolError:
+                    raise
                 except Exception as e:
                     logger.warning(f"Failed to parse industry performance from CSV: {e}")
                     continue
@@ -117,6 +124,8 @@ class FinvizSectorAnalysisClient(FinvizClient):
             logger.info(f"Retrieved performance data for {len(industry_data)} industries")
             return industry_data
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error retrieving industry performance: {e}")
             return []
@@ -153,6 +162,8 @@ class FinvizSectorAnalysisClient(FinvizClient):
                     country_perf = self._parse_country_performance_from_csv(row)
                     if country_perf:
                         country_data.append(country_perf)
+                except ToolError:
+                    raise
                 except Exception as e:
                     logger.warning(f"Failed to parse country performance from CSV: {e}")
                     continue
@@ -164,6 +175,8 @@ class FinvizSectorAnalysisClient(FinvizClient):
             logger.info(f"Retrieved performance data for {len(country_data)} countries")
             return country_data
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error retrieving country performance: {e}")
             return []
@@ -225,6 +238,8 @@ class FinvizSectorAnalysisClient(FinvizClient):
                         # セクター情報を追加
                         industry_perf['parent_sector'] = sector
                         industry_data.append(industry_perf)
+                except ToolError:
+                    raise
                 except Exception as e:
                     logger.warning(f"Failed to parse sector-specific industry performance from CSV: {e}")
                     continue
@@ -232,6 +247,8 @@ class FinvizSectorAnalysisClient(FinvizClient):
             logger.info(f"Retrieved performance data for {len(industry_data)} industries in {sector} sector")
             return industry_data
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error retrieving sector-specific industry performance: {e}")
             return []
@@ -265,6 +282,8 @@ class FinvizSectorAnalysisClient(FinvizClient):
                     cap_perf = self._parse_capitalization_performance_from_csv(row)
                     if cap_perf:
                         cap_data.append(cap_perf)
+                except ToolError:
+                    raise
                 except Exception as e:
                     logger.warning(f"Failed to parse capitalization performance from CSV: {e}")
                     continue
@@ -272,6 +291,8 @@ class FinvizSectorAnalysisClient(FinvizClient):
             logger.info(f"Retrieved performance data for {len(cap_data)} capitalization categories")
             return cap_data
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error retrieving capitalization performance: {e}")
             return []
@@ -304,6 +325,8 @@ class FinvizSectorAnalysisClient(FinvizClient):
                 'stocks': str(row.get('Stocks', 'N/A'))
             }
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.warning(f"Failed to parse sector performance from CSV row: {e}")
             return None
@@ -336,6 +359,8 @@ class FinvizSectorAnalysisClient(FinvizClient):
                 'stock_count': self._safe_parse_number(row.get('Stocks', 0))
             }
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.warning(f"Failed to parse industry performance from CSV row: {e}")
             return None
@@ -368,6 +393,8 @@ class FinvizSectorAnalysisClient(FinvizClient):
                 'stock_count': self._safe_parse_number(row.get('Stocks', 0))
             }
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.warning(f"Failed to parse country performance from CSV row: {e}")
             return None
@@ -420,6 +447,8 @@ class FinvizSectorAnalysisClient(FinvizClient):
                 'stocks': str(row.get('Stocks', 'N/A'))
             }
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.warning(f"Failed to parse capitalization performance from CSV row: {e}")
             return None

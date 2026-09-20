@@ -1,3 +1,4 @@
+from mcp.server.fastmcp.exceptions import ToolError
 import logging
 from typing import Dict, List, Optional, Any
 from urllib.parse import urlencode
@@ -733,6 +734,8 @@ class FinvizScreener(FinvizClient):
             max_results = kwargs.get('max_results', 100)
             return results[:max_results]
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error in upcoming_earnings_screen: {e}")
             return []
@@ -783,6 +786,8 @@ class FinvizScreener(FinvizClient):
             max_results = kwargs.get('max_results', 50)
             return results[:max_results]
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.error(f"Error in earnings_winners_screener: {e}")
             return []
@@ -956,6 +961,8 @@ class FinvizScreener(FinvizClient):
             
             return upcoming_data
             
+        except ToolError:
+            raise
         except Exception as e:
             logger.warning(f"Failed to convert stock data to upcoming earnings data: {e}")
             return None
