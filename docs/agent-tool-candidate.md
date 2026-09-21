@@ -25,7 +25,10 @@ Verification on 2026-09-20:
   Do not treat the full suite as green or ready for release.
 - Actual two-server catalog gate: all 31 curated upstream tools register in
   Brain, for 41 total tools and 28 exposed output schemas.
-- No fresh autonomous agent evaluation or real ChatGPT/Claude canary run yet.
+- Subsequent ChatGPT web Work-mode OAuth canary passed: native authors/Substack
+  tools and bridged NVDA fundamentals with `fields=["price"]`, corroborated by
+  server logs. See the [personal connection runbook](https://github.com/Rj7/brain-mcp/blob/codex/agent-tool-usability/docs/CHATGPT.md).
+  No fresh autonomous evaluation, normal Chat after setup, mobile, or Claude canary.
 - Both services were restarted into versioned releases. Credentials, OAuth
   configuration, and original checkout modifications remained unchanged. A live
   NVDA price request succeeded; other provider endpoints are not comprehensively verified.
