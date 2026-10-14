@@ -11,6 +11,7 @@ import os
 import logging
 from typing import List, Dict, Any, Optional
 from unittest.mock import patch, Mock
+from mcp.server.fastmcp.exceptions import ToolError
 
 # プロジェクトルートをパスに追加
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -46,7 +47,7 @@ class TestComprehensiveE2E:
             volume=45000000,
             avg_volume=55000000,
             relative_volume=0.82,
-            market_cap=2800000000000,
+            market_cap=2800000,  # Provider unit: USD millions ($2.8T).
             pe_ratio=28.5,
             eps=6.12,
             eps_next_y=6.50,
@@ -96,7 +97,7 @@ class TestComprehensiveE2E:
                 price_change=8.25,
                 price_change_percent=2.00,
                 volume=25000000,
-                market_cap=3100000000000,
+                market_cap=3100000,
                 pe_ratio=32.1,
                 eps=12.05
             )
@@ -128,14 +129,13 @@ class TestComprehensiveE2E:
         with patch.object(FinvizScreener, "volume_surge_screener") as mock_screener:
             mock_screener.return_value = self.sample_stocks_list
 
-            result = await server.call_tool("volume_surge_screener", {
-                "random_string": "test"
-            })
+            result = await server.call_tool("volume_surge_screener", {})
 
             assert result is not None
             result_text = str(result[0].text)
-            assert "固定フィルタ条件" in result_text
-            mock_screener.assert_called_once()
+            assert "Volume Surge Screening Results (2 stocks found)" in result_text
+            assert "AAPL | MSFT" in result_text
+            mock_screener.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_earnings_trading_screener_real_call(self):
@@ -143,46 +143,54 @@ class TestComprehensiveE2E:
         with patch.object(FinvizScreener, "earnings_trading_screener") as mock_screener:
             mock_screener.return_value = self.sample_stocks_list
 
-            result = await server.call_tool("earnings_trading_screener", {
-                "random_string": "test"
-            })
+            result = await server.call_tool("earnings_trading_screener", {})
 
             assert result is not None
             result_text = str(result[0].text)
-            assert "EPS Surprise" in result_text or "Revenue Surprise" in result_text
-            mock_screener.assert_called_once()
+            assert "Earnings Trading Screening Results (2 stocks found)" in result_text
+            assert "AAPL | MSFT" in result_text
+            mock_screener.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_get_stock_fundamentals_real_call(self):
         """単一銘柄ファンダメンタルデータ取得のテスト"""
-        with patch.object(FinvizClient, "get_stock_fundamentals") as mock_client:
-            mock_client.return_value = self.sample_stock_data
+        with patch.object(FinvizClient, "get_multiple_stocks_fundamentals") as mock_client:
+            mock_client.return_value = [{
+                "ticker": "AAPL", "company": "Apple Inc.", "price": 180.5, "market_cap": 2800000,
+            }]
 
             result = await server.call_tool("get_stock_fundamentals", {
-                "ticker": "AAPL"
+                "ticker": "AAPL", "data_fields": ["company", "price", "market_cap"]
             })
 
             assert result is not None
-            result_text = str(result[0].text)
-            assert "AAPL" in result_text
-            assert "Apple Inc." in result_text
-            mock_client.assert_called_once()
+            data = result.structuredContent
+            assert data["fields"] == ["company", "price", "market_cap"]
+            assert data["stocks"] == [{
+                "ticker": "AAPL", "values": {"company": "Apple Inc.", "price": 180.5, "market_cap": 2800000},
+                "missing_fields": [], "available_fields": 3, "requested_fields": 3,
+            }]
+            assert data["units"]["market_cap"] == "USD millions"
+            assert "Apple Inc." in result.content[0].text
+            mock_client.assert_called_once_with(["AAPL"], ["company", "price", "market_cap"])
 
     @pytest.mark.asyncio
     async def test_get_multiple_stocks_fundamentals_real_call(self):
         """複数銘柄ファンダメンタルデータ取得のテスト"""
         with patch.object(FinvizClient, "get_multiple_stocks_fundamentals") as mock_client:
-            mock_client.return_value = self.sample_stocks_list
+            mock_client.return_value = [stock.to_dict() for stock in self.sample_stocks_list]
 
             result = await server.call_tool("get_multiple_stocks_fundamentals", {
                 "tickers": ["AAPL", "MSFT"]
             })
 
             assert result is not None
-            result_text = str(result[0].text)
-            assert "AAPL" in result_text
-            assert "MSFT" in result_text
-            mock_client.assert_called_once()
+            data = result.structuredContent
+            assert [row["ticker"] for row in data["stocks"]] == ["AAPL", "MSFT"]
+            assert [row["values"]["price"] for row in data["stocks"]] == [180.5, 420.75]
+            assert data["fields"] == ["price", "pe_ratio", "market_cap"]
+            assert all(row["missing_fields"] == [] for row in data["stocks"])
+            mock_client.assert_called_once_with(["AAPL", "MSFT"], ["price", "pe_ratio", "market_cap"])
 
     # ===========================================
     # 属性アクセスパターンテスト
@@ -269,28 +277,19 @@ class TestComprehensiveE2E:
     @pytest.mark.asyncio
     async def test_invalid_ticker_handling(self):
         """無効なティッカーのエラーハンドリングテスト"""
-        with patch.object(FinvizClient, "get_stock_fundamentals") as mock_client:
-            mock_client.side_effect = ValueError("Invalid ticker: INVALID")
-
-            result = await server.call_tool("get_stock_fundamentals", {
-                "ticker": "INVALID"
-            })
-
-            assert result is not None
-            result_text = str(result[0].text)
-            assert "Error" in result_text or "エラー" in result_text
+        with patch.object(FinvizClient, "get_multiple_stocks_fundamentals") as mock_client:
+            with pytest.raises(ToolError, match="ticker"):
+                await server.call_tool("get_stock_fundamentals", {"ticker": "INVALID"})
+            mock_client.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_invalid_parameters_handling(self):
         """無効なパラメータのエラーハンドリングテスト"""
         # 無効な決算日でテスト
-        result = await server.call_tool("earnings_screener", {
-            "earnings_date": "invalid_date"
-        })
-
-        assert result is not None
-        result_text = str(result[0].text)
-        assert "Error" in result_text or "Invalid" in result_text
+        with patch.object(FinvizScreener, "earnings_screener") as mock_screener:
+            with pytest.raises(ToolError, match="Invalid earnings_date"):
+                await server.call_tool("earnings_screener", {"earnings_date": "invalid_date"})
+            mock_screener.assert_not_called()
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"]) 
+    pytest.main([__file__, "-v"])

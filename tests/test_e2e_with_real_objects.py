@@ -26,7 +26,7 @@ class TestE2EWithRealObjects:
             price_change_percent=1.32,
             volume=45000000,
             avg_volume=55000000,
-            market_cap=2800000000000,
+            market_cap=2800000,  # CSV market cap is in USD millions.
             pe_ratio=28.5,
             eps=6.12,
             eps_next_y=6.50,
@@ -85,20 +85,14 @@ class TestE2EWithRealObjects:
             mock_screener.return_value = self.mock_results_with_real_objects
             
             # 実際にserver.pyが呼び出される
-            result = await server.call_tool("earnings_trading_screener", {
-                "earnings_window": "yesterday_after_today_before",
-                "market_cap": "large",
-                "min_price": 10.0,
-                "min_avg_volume": 1000000,
-                "earnings_revision": "eps_revenue_positive",
-                "price_trend": "positive_change"
-            })
+            result = await server.call_tool("earnings_trading_screener", {})
             
             # 結果が正常に返されることを確認
             assert result is not None
             # server.pyでの文字列フォーマットが正常に動作することを確認
-            assert "AAPL" in str(result)
-            mock_screener.assert_called_once()
+            assert "Earnings Trading Screening Results (1 stocks found)" in result[0].text
+            assert "AAPL" in result[0].text
+            mock_screener.assert_called_once_with()
 
     @pytest.mark.asyncio 
     async def test_earnings_premarket_screener_real_data(self):
@@ -107,16 +101,14 @@ class TestE2EWithRealObjects:
         with patch.object(FinvizScreener, "earnings_premarket_screener") as mock_screener:
             mock_screener.return_value = self.mock_results_with_real_objects
             
-            result = await server.call_tool("earnings_premarket_screener", {
-                "earnings_timing": "today_before",
-                "market_cap": "large",
-                "min_price": 50.0,
-                "min_price_change": 2.0
-            })
+            result = await server.call_tool("earnings_premarket_screener", {})
             
             assert result is not None
             # 実際のStockDataの属性アクセスが成功することを確認
-            mock_screener.assert_called_once()
+            assert "AAPL" in result[0].text
+            assert "180.50" in result[0].text
+            assert "Apple Inc." in result[0].text
+            mock_screener.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_volume_surge_screener_comprehensive_attributes(self):
@@ -134,7 +126,7 @@ class TestE2EWithRealObjects:
             volume=85000000,
             avg_volume=45000000,
             relative_volume=1.89,
-            market_cap=1100000000000,
+            market_cap=1100000,
             pe_ratio=65.2,
             eps=12.45,
             performance_1w=8.5,
@@ -152,19 +144,15 @@ class TestE2EWithRealObjects:
         with patch.object(FinvizScreener, "volume_surge_screener") as mock_screener:
             mock_screener.return_value = enhanced_results
             
-            result = await server.call_tool("volume_surge_screener", {
-                "market_cap": "large",
-                "min_price": 100.0,
-                "min_relative_volume": 1.5,
-                "min_price_change": 3.0,
-                "sma_filter": "above_sma200"
-            })
+            result = await server.call_tool("volume_surge_screener", {})
             
             assert result is not None
             # 高度な属性アクセスをテスト
             assert enhanced_stock.relative_volume == 1.89
             assert enhanced_stock.sma_200 == 385.90
-            mock_screener.assert_called_once()
+            assert "Volume Surge Screening Results (1 stocks found)" in result[0].text
+            assert "NVDA" in result[0].text
+            mock_screener.assert_called_once_with()
 
     def test_stockdata_attribute_access_patterns(self):
         """server.pyで使用される属性アクセスパターンを直接テスト"""
@@ -273,4 +261,4 @@ class TestE2EWithRealObjects:
             pytest.fail(f"Error handling None attributes: {e}")
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"]) 
+    pytest.main([__file__, "-v"])

@@ -7,6 +7,7 @@ client functions.
 import pytest
 import pandas as pd
 from unittest.mock import patch, MagicMock
+from mcp.server.fastmcp.exceptions import ToolError
 
 from src.utils.validators import (
     validate_and_normalize_raw_filters,
@@ -301,7 +302,7 @@ class TestCustomScreenerTool:
                 "filters": "cap_large,fa_div_o3",
             })
 
-            text = result[0][0].text
+            text = result[0].text
             # Core values must appear — not "N/A"
             assert "Apple Inc." in text
             assert "$195.50" in text
@@ -324,7 +325,7 @@ class TestCustomScreenerTool:
                 "filters": "cap_nano",
             })
 
-            text = result[0][0].text
+            text = result[0].text
             assert "No stocks found" in text
 
     @pytest.mark.asyncio
@@ -352,39 +353,34 @@ class TestCustomScreenerTool:
                 "filters": "cap_small",
             })
 
-            text = result[0][0].text
+            text = result[0].text
             assert "+0.00%" in text       # price_change == 0
             assert "P/E: 0.0" in text     # pe_ratio == 0
 
     @pytest.mark.asyncio
     async def test_invalid_max_results_returns_error(self):
-        """max_results outside 1-500 should return an explicit error."""
+        """The MCP limit is 1-100; invalid arguments fail before provider access."""
         from src.server import server
 
-        result = await server.call_tool("custom_screener", {
-            "filters": "cap_large",
-            "max_results": 0,
-        })
-        text = result[0][0].text
-        assert "Invalid max_results" in text
-
-        result2 = await server.call_tool("custom_screener", {
-            "filters": "cap_large",
-            "max_results": 501,
-        })
-        text2 = result2[0][0].text
-        assert "Invalid max_results" in text2
+        with patch("src.server.finviz_client") as mock_client:
+            for maximum in [0, 101, 501]:
+                with pytest.raises(ToolError, match="max_results"):
+                    await server.call_tool("custom_screener", {
+                        "filters": "cap_large", "max_results": maximum,
+                    })
+            mock_client.screen_stocks_raw.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_filter_validation_error(self):
         """Invalid filter tokens return a clear validation error."""
         from src.server import server
 
-        result = await server.call_tool("custom_screener", {
-            "filters": "<script>alert(1)</script>",
-        })
-        text = result[0][0].text
-        assert "Filter validation error" in text
+        with patch("src.server.finviz_client") as mock_client:
+            with pytest.raises(ToolError, match="[Ff]ilter"):
+                await server.call_tool("custom_screener", {
+                    "filters": "<script>alert(1)</script>",
+                })
+            mock_client.screen_stocks_raw.assert_not_called()
 
 
 if __name__ == "__main__":

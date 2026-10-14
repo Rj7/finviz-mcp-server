@@ -41,6 +41,7 @@ from src.server import (
 @dataclass
 class TestResult:
     """テスト結果を管理するデータクラス"""
+    __test__ = False  # Report record, not a pytest test class.
     test_name: str
     success: bool
     execution_time: float
@@ -504,4 +505,4 @@ def main():
 
 if __name__ == "__main__":
     result = main()
-    sys.exit(0 if result else 1) 
+    sys.exit(0 if result else 1)

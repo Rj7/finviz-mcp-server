@@ -14,6 +14,8 @@ from sec_edgar_api import EdgarClient
 
 from ..models import SECFilingData
 from ..utils.validators import validate_ticker
+from ..agent_contracts import provider_error
+from mcp.server.fastmcp.exceptions import ToolError
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +59,7 @@ class EdgarAPIClient:
             return None
             
         except Exception as e:
-            logger.error(f"Error getting CIK for ticker {ticker}: {e}")
-            return None
+            raise provider_error(e) from e
 
     def get_company_filings(
         self,
@@ -90,16 +91,16 @@ class EdgarAPIClient:
             # Get CIK from ticker
             cik = self._get_cik_from_ticker(ticker)
             if not cik:
-                logger.error(f"Could not find CIK for ticker {ticker}")
-                return []
+                raise ToolError(f'NOT_FOUND: no SEC CIK for ticker {ticker}')
             
             # Get submissions data
             submissions = self.client.get_submissions(cik=cik)
-            if not submissions or 'filings' not in submissions:
-                logger.warning(f"No submissions found for {ticker} (CIK: {cik})")
-                return []
+            if not isinstance(submissions, dict) or not isinstance(submissions.get('filings'), dict):
+                raise ToolError('PROVIDER_CONTRACT: EDGAR submissions lack filings data')
             
-            recent_filings = submissions['filings']['recent']
+            recent_filings = submissions['filings'].get('recent')
+            if not isinstance(recent_filings, dict) or not isinstance(recent_filings.get('form'), list):
+                raise ToolError('PROVIDER_CONTRACT: EDGAR submissions lack recent filing forms')
             
             # Extract filing data
             filings = []
@@ -109,6 +110,21 @@ class EdgarAPIClient:
             accession_numbers = recent_filings.get('accessionNumber', [])
             primary_documents = recent_filings.get('primaryDocument', [])
             descriptions = recent_filings.get('primaryDocDescription', [])
+
+            # Validate before filtering or limiting: malformed rows must not become
+            # a successful empty (or silently partial) result.
+            if forms:
+                for column in (forms, filing_dates, accession_numbers, primary_documents):
+                    if (not isinstance(column, list) or len(column) != len(forms)
+                            or any(not isinstance(value, str) or not value.strip() for value in column)):
+                        raise ToolError('PROVIDER_CONTRACT: invalid EDGAR filing columns')
+                for filing_date in filing_dates:
+                    try:
+                        parsed_date = datetime.strptime(filing_date, '%Y-%m-%d')
+                        if parsed_date.strftime('%Y-%m-%d') != filing_date:
+                            raise ValueError('Noncanonical date')
+                    except ValueError as exc:
+                        raise ToolError('PROVIDER_CONTRACT: invalid EDGAR filing date') from exc
             
             for i in range(len(forms)):
                 if len(filings) >= max_count:
@@ -154,8 +170,7 @@ class EdgarAPIClient:
             return filings
             
         except Exception as e:
-            logger.error(f"Error fetching EDGAR filings for {ticker}: {e}")
-            return []
+            raise provider_error(e) from e
     
     def get_filing_document_content(
         self,
@@ -342,7 +357,7 @@ class EdgarAPIClient:
             cik = self._get_cik_from_ticker(ticker)
             
             if not cik:
-                return {'error': f'Could not find CIK for ticker {ticker}'}
+                raise ToolError(f'NOT_FOUND: no SEC CIK for ticker {ticker}')
             
             # Get concept data
             # The SDK names this parameter `tag` (the XBRL tag), not `concept`.
@@ -351,9 +366,10 @@ class EdgarAPIClient:
                 taxonomy=taxonomy,
                 tag=concept
             )
+            if not isinstance(concept_data, dict) or not isinstance(concept_data.get('units'), dict):
+                raise ToolError('PROVIDER_CONTRACT: EDGAR concept lacks reported units')
             
             return concept_data
             
         except Exception as e:
-            logger.error(f"Error fetching concept {concept} for {ticker}: {e}")
-            return {'error': str(e)}
+            raise provider_error(e) from e

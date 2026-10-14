@@ -3,7 +3,9 @@
 Branch: `codex/agent-tool-usability`, based on `5b693ba`. Publish to Raja's
 `fork` remote, not the upstream `tradermonty` repository. This branch was deployed
 for user testing on 2026-09-20 with explicit authorization, but remains **not
-merge-ready**. The known full-suite failures are not resolved.
+merge-ready** at that deployment point. The follow-up candidate now passes the
+full offline suite: **837 tests**. Those follow-up changes are **not deployed**;
+see the [repair record](2026-09-20-regression-repair.md) for scope and limitations.
 
 Deployed source: `f9b5b4b` (including `78b3275` and `21be7c4`). Companion Brain:
 `fc43712` on its `codex/agent-tool-usability` branch. Full status, review
@@ -12,7 +14,8 @@ disposition, measured output sizes, remaining gates, and rollback guidance:
 The [deployment and rollback record](https://github.com/Rj7/brain-mcp/blob/codex/agent-tool-usability/docs/DEPLOYMENT.md)
 documents the ThinkPad-hosted services and existing Cloudflare Tunnel endpoint.
 
-Verification on 2026-09-20:
+Historical verification of the deployed copy on 2026-09-20 (superseded for the
+working candidate, not for the running service):
 
 - Focused contract suites: **74 passed**, including actual MCP error flags and
   partial filing batches, provider-error fixtures, options identity, pagination,
@@ -75,7 +78,8 @@ python -m pytest tests/test_agent_tool_contracts.py tests/test_options_contract.
 
 Use an isolated test environment with `pytest-asyncio` available. The verification
 run used a temporary dependency directory instead of modifying the production
-venv. Full offline comparisons disabled network requests and delay sleeps in
-both baseline and candidate. Keep full-suite migration, remaining legacy
-error/data contracts, live-provider validation and end-client checks as explicit
-release gates. Do not merge or deploy based only on the focused suite.
+venv. Historical offline comparisons disabled network requests and delay sleeps in
+both baseline and candidate. The follow-up full suite now uses an autouse network
+guard and passes; see the repair record above. Remaining legacy error/data
+contracts, live-provider validation and end-client checks are still explicit
+release gates. Do not merge or deploy based only on focused tests.

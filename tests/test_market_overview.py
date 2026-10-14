@@ -1,95 +1,37 @@
-#!/usr/bin/env python3
-"""
-Market Overview機能のテスト
-"""
-import os
-import sys
+"""Market overview distinguishes missing components from zero activity."""
+import pytest
+from mcp.server.fastmcp.exceptions import ToolError
+from src import server
 
-# プロジェクトルートをパスに追加
-project_root = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(project_root, 'src'))
+def unavailable(*args, **kwargs):
+    raise RuntimeError('fixture outage')
 
-def test_import():
-    """インポートテスト"""
-    try:
-        from utils.validators import validate_ticker
-        from utils.finviz_client import FinvizClient
-        from utils.screeners import FinvizScreener
-        print("✅ 必要なモジュールのインポート成功")
-        return True
-    except Exception as e:
-        print(f"❌ インポートエラー: {str(e)}")
-        return False
+def test_market_overview_preserves_values_without_inventing_quote_time(monkeypatch):
+    monkeypatch.setattr(server.finviz_client, 'get_multiple_stocks_fundamentals',
+                        lambda *a, **kw: [{'ticker': 'SPY', 'price': 500}])
+    for name in ('volume_surge_screener', 'uptrend_screener', 'earnings_screener'):
+        monkeypatch.setattr(server.finviz_screener, name, lambda *a, **kw: [])
+    result = server.get_market_overview().structuredContent
+    assert result['etfs'] == [{'ticker': 'SPY', 'price': 500}]
+    assert result['statistics'] == {'volume_surge_count': 0, 'uptrend_count': 0, 'earnings_this_week_count': 0}
+    assert result['as_of'] is None
+    assert result['partial'] is False
+    assert result['errors'] == {}
 
-def test_market_overview_syntax():
-    """構文チェック"""
-    try:
-        # server.pyの構文チェック
-        import ast
-        with open('src/server.py', 'r', encoding='utf-8') as f:
-            source = f.read()
-        
-        ast.parse(source)
-        print("✅ server.py 構文チェック成功")
-        return True
-    except SyntaxError as e:
-        print(f"❌ 構文エラー: {str(e)}")
-        print(f"   行 {e.lineno}: {e.text}")
-        return False
+def test_market_overview_partial_failure_is_not_zero_activity(monkeypatch):
+    monkeypatch.setattr(server.finviz_client, 'get_multiple_stocks_fundamentals', lambda *a, **kw: [{'ticker': 'SPY', 'price': 500}])
+    monkeypatch.setattr(server.finviz_screener, 'volume_surge_screener', unavailable)
+    monkeypatch.setattr(server.finviz_screener, 'uptrend_screener', lambda: [])
+    monkeypatch.setattr(server.finviz_screener, 'earnings_screener', lambda **kw: [])
+    result = server.get_market_overview().structuredContent
+    assert result['partial'] is True
+    assert result['statistics']['volume_surge_count'] is None
+    assert result['statistics']['uptrend_count'] == 0
+    assert 'volume_surge_count' in result['errors']
 
-def test_finviz_tools():
-    """Finvizツールの基本テスト"""
-    try:
-        # バリデーション機能テスト
-        from utils.validators import validate_ticker
-        
-        # 正常なティッカー
-        assert validate_ticker("SPY") == True
-        assert validate_ticker("QQQ") == True
-        assert validate_ticker("AAPL") == True
-        
-        # 不正なティッカー
-        assert validate_ticker("") == False
-        assert validate_ticker("12345") == False
-        
-        print("✅ バリデーション機能テスト成功")
-        return True
-    except Exception as e:
-        print(f"❌ バリデーションテストエラー: {str(e)}")
-        return False
-
-def main():
-    print("🚀 Market Overview 実装テスト開始")
-    print("=" * 50)
-    
-    # テスト実行
-    tests = [
-        ("インポートテスト", test_import),
-        ("構文チェック", test_market_overview_syntax),
-        ("Finvizツールテスト", test_finviz_tools)
-    ]
-    
-    passed = 0
-    total = len(tests)
-    
-    for test_name, test_func in tests:
-        print(f"\n📊 {test_name}:")
-        if test_func():
-            passed += 1
-        else:
-            print(f"❌ {test_name} 失敗")
-    
-    print("\n" + "=" * 50)
-    print(f"🎯 テスト結果: {passed}/{total} 通過")
-    
-    if passed == total:
-        print("✅ 全てのテストが成功しました！")
-        print("🚀 market_overview実装完了")
-    else:
-        print("❌ 一部のテストが失敗しました")
-        
-    return passed == total
-
-if __name__ == "__main__":
-    success = main()
-    sys.exit(0 if success else 1) 
+def test_market_overview_all_failed_is_error(monkeypatch):
+    monkeypatch.setattr(server.finviz_client, 'get_multiple_stocks_fundamentals', unavailable)
+    for name in ('volume_surge_screener', 'uptrend_screener', 'earnings_screener'):
+        monkeypatch.setattr(server.finviz_screener, name, unavailable)
+    with pytest.raises(ToolError, match='UPSTREAM_UNAVAILABLE'):
+        server.get_market_overview()

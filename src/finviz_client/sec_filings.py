@@ -6,6 +6,7 @@ import requests
 
 from .base import FinvizClient
 from ..models import SECFilingData
+from ..agent_contracts import provider_error
 
 logger = logging.getLogger(__name__)
 
@@ -208,8 +209,8 @@ class FinvizSECFilingsClient(FinvizClient):
                     
                     # 必須フィールドの検証
                     if not filing_date or not form:
-                        logger.warning(f"Skipping row {idx}: missing required fields")
-                        continue
+                        raise ValueError('PROVIDER_CONTRACT: SEC filing row lacks date or form')
+                    self._parse_date(filing_date)
                     
                     filing = SECFilingData(
                         ticker=ticker,
@@ -223,8 +224,7 @@ class FinvizSECFilingsClient(FinvizClient):
                     filings.append(filing)
                     
                 except Exception as e:
-                    logger.warning(f"Failed to parse filing row {idx}: {e}")
-                    continue
+                    raise ValueError('PROVIDER_CONTRACT: invalid SEC filing row') from e
             
             logger.info(f"Successfully parsed {len(filings)} filings for {ticker}")
             return filings
@@ -303,5 +303,4 @@ class FinvizSECFilingsClient(FinvizClient):
             return summary
             
         except Exception as e:
-            logger.error(f"Error generating filing summary for {ticker}: {e}")
-            return {"ticker": ticker, "error": str(e)}
+            raise provider_error(e) from e

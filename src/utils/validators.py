@@ -88,8 +88,15 @@ def validate_price_range(min_price: Optional[Union[int, float, str]], max_price:
                 return None
         return None
     
+    import math
+    if isinstance(min_price, bool) or isinstance(max_price, bool):
+        return False
     min_val = _convert_to_float(min_price)
     max_val = _convert_to_float(max_price)
+
+    for original, parsed in ((min_price, min_val), (max_price, max_val)):
+        if original is not None and (parsed is None or not math.isfinite(parsed)):
+            return False
     
     if min_val is not None and min_val < 0:
         return False

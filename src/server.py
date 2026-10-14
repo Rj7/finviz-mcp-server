@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from mcp.server.fastmcp import FastMCP
 from .tool_policy import ContractFastMCP
+from .agent_contracts import provider_error
 from mcp.types import TextContent
 
 from .utils.validators import validate_ticker, validate_tickers, parse_tickers, validate_market_cap, validate_earnings_date, validate_price_range, validate_sector, validate_volume, validate_screening_params, validate_data_fields, validate_and_normalize_raw_filters, validate_raw_sort_order, validate_signal
@@ -144,6 +145,9 @@ def earnings_screener(
         }
         
         results = finviz_screener.earnings_screener(**params)
+
+        if not isinstance(results, list):
+            raise ToolError('PROVIDER_CONTRACT: earnings screener must return a stock list')
         
         if not results:
             return [TextContent(type="text", text="No stocks found matching the criteria.")]
@@ -2011,7 +2015,7 @@ def get_sec_filing_summary(
         summary = finviz_sec.get_filing_summary(ticker, days_back)
         
         if "error" in summary:
-            return [TextContent(type="text", text=f"Error getting filing summary for {ticker}: {summary['error']}")]
+            raise ToolError('UPSTREAM_UNAVAILABLE: SEC filing summary failed')
         
         if summary.get("total_filings", 0) == 0:
             return [TextContent(type="text", text=f"No SEC filings found for {ticker} in the last {days_back} days.")]
@@ -2054,7 +2058,7 @@ def get_sec_filing_summary(
         raise e
     except Exception as e:
         logger.error(f"Error in get_sec_filing_summary: {str(e)}")
-        raise ToolError(str(e)) from e
+        raise provider_error(e) from e
 
 server.add_tool(get_edgar_filing_content)
 
@@ -2149,7 +2153,7 @@ def get_edgar_company_filings(
         raise e
     except Exception as e:
         logger.error(f"Error in get_edgar_company_filings: {str(e)}")
-        raise ToolError(str(e)) from e
+        raise provider_error(e) from e
 
 @server.tool()
 def get_edgar_company_facts(
@@ -2171,16 +2175,16 @@ def get_edgar_company_facts(
         # Get CIK from ticker first
         cik = edgar_client._get_cik_from_ticker(ticker)
         if not cik:
-            return [TextContent(type="text", text=f"Could not find CIK for ticker {ticker}. Please verify the ticker symbol.")]
+            raise ToolError(f'NOT_FOUND: no SEC CIK for ticker {ticker}')
         
         # Get company facts via EDGAR API
         try:
             company_facts = edgar_client.client.get_company_facts(cik)
         except Exception as e:
-            return [TextContent(type="text", text=f"Error fetching company facts for {ticker}: {str(e)}")]
+            raise provider_error(e) from e
         
-        if not company_facts:
-            return [TextContent(type="text", text=f"No company facts found for {ticker}.")]
+        if not isinstance(company_facts, dict) or not isinstance(company_facts.get('facts'), dict):
+            raise ToolError('PROVIDER_CONTRACT: EDGAR company facts lack taxonomies')
         
         # Extract basic information
         cik = company_facts.get('cik', 'N/A')
@@ -2236,7 +2240,7 @@ def get_edgar_company_facts(
         raise e
     except Exception as e:
         logger.error(f"Error in get_edgar_company_facts: {str(e)}")
-        raise ToolError(str(e)) from e
+        raise provider_error(e) from e
 
 @server.tool()
 def get_edgar_company_concept(
@@ -2267,7 +2271,7 @@ def get_edgar_company_concept(
         )
         
         if 'error' in concept_data:
-            return [TextContent(type="text", text=f"Error: {concept_data['error']}")]
+            raise ToolError('UPSTREAM_UNAVAILABLE: EDGAR concept lookup failed')
         
         # Extract basic information
         cik = concept_data.get('cik', 'N/A')
@@ -2340,7 +2344,7 @@ def get_edgar_company_concept(
         raise e
     except Exception as e:
         logger.error(f"Error in get_edgar_company_concept: {str(e)}")
-        raise ToolError(str(e)) from e
+        raise provider_error(e) from e
 
 
 # Register Field Discovery Tools
@@ -2532,23 +2536,23 @@ def custom_screener(
         # --- Validate filters ---
         filter_errors, normalized_filters = validate_and_normalize_raw_filters(filters)
         if filter_errors:
-            return [TextContent(type="text", text=f"Filter validation error: {'; '.join(filter_errors)}")]
+            raise ToolError(f"INVALID_ARGUMENT: Filter validation error: {'; '.join(filter_errors)}")
 
         # --- Validate optional signal ---
         if signal is not None:
             signal_errors = validate_signal(signal)
             if signal_errors:
-                return [TextContent(type="text", text=f"Signal validation error: {'; '.join(signal_errors)}")]
+                raise ToolError(f"INVALID_ARGUMENT: Signal validation error: {'; '.join(signal_errors)}")
 
         # --- Validate optional order ---
         if order is not None:
             order_errors = validate_raw_sort_order(order)
             if order_errors:
-                return [TextContent(type="text", text=f"Order validation error: {'; '.join(order_errors)}")]
+                raise ToolError(f"INVALID_ARGUMENT: Order validation error: {'; '.join(order_errors)}")
 
         # --- Validate max_results ---
         if not isinstance(max_results, int) or max_results < 1 or max_results > 500:
-            return [TextContent(type="text", text=f"Invalid max_results: {max_results} (must be an integer between 1 and 500)")]
+            raise ToolError(f"INVALID_ARGUMENT: Invalid max_results: {max_results} (must be an integer between 1 and 500)")
 
         # --- Execute screening ---
         stocks = finviz_client.screen_stocks_raw(

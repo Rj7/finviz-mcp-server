@@ -10,6 +10,9 @@ import logging
 import sys
 import os
 from typing import Dict, Any
+from unittest.mock import patch
+from src.models import StockData
+from src.finviz_client.screener import FinvizScreener
 
 # Add project root to path for imports
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -32,7 +35,13 @@ async def test_uptrend_screener():
         logger.info("📊 Starting uptrend screener test...")
         
         # Call the uptrend screener tool via MCP server
-        result = await server.call_tool("uptrend_screener", {"random_string": "test"})
+        stocks = [StockData(ticker="AAPL", company_name="Apple Inc.", sector="Technology", industry="Consumer Electronics")]
+        with patch.object(FinvizScreener, "uptrend_screener", return_value=stocks) as provider:
+            result = await server.call_tool("uptrend_screener", {})
+            provider.assert_called_once_with()
+        assert "Uptrend Screening Results (1 stocks found)" in result[0].text
+        assert "Fixed Filter Criteria" in result[0].text
+        assert "AAPL" in result[0].text
         
         logger.info("✅ Successfully called uptrend screener")
         
@@ -49,7 +58,6 @@ async def test_uptrend_screener():
             else:
                 print(f"Result: {result}")
                 
-        return result
         
     except Exception as e:
         logger.error(f"❌ Error testing uptrend screener: {str(e)}")
@@ -82,7 +90,6 @@ async def test_server_initialization():
             
         logger.info("✅ Server initialization test passed")
         
-        return True
         
     except Exception as e:
         logger.error(f"❌ Server initialization test failed: {str(e)}")
@@ -123,4 +130,4 @@ if __name__ == "__main__":
     success = asyncio.run(main())
     
     # Exit with appropriate code
-    sys.exit(0 if success else 1) 
+    sys.exit(0 if success else 1)
