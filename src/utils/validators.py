@@ -19,21 +19,41 @@ def validate_ticker(ticker: str) -> bool:
     pattern = r'^[A-Z]{1,5}$'
     return bool(re.match(pattern, ticker.upper()))
 
-def validate_tickers(tickers: str) -> bool:
+def _normalize_tickers(tickers: Union[str, List[str]]) -> Optional[List[str]]:
+    """
+    ティッカー入力を正規化されたリストに変換
+    
+    Args:
+        tickers: カンマ区切りのティッカーシンボル文字列、またはそのリスト
+        
+    Returns:
+        大文字に正規化されたティッカーのリスト。入力の型が不正な場合は None
+    """
+    if isinstance(tickers, str):
+        raw = tickers.split(',')
+    elif isinstance(tickers, (list, tuple)):
+        raw = []
+        for item in tickers:
+            if not isinstance(item, str):
+                return None
+            # リストの各要素自体がカンマ区切りの場合も許容
+            raw.extend(item.split(','))
+    else:
+        return None
+    
+    return [t.strip().upper() for t in raw if t.strip()]
+
+def validate_tickers(tickers: Union[str, List[str]]) -> bool:
     """
     複数のティッカーシンボルの妥当性をチェック
     
     Args:
-        tickers: カンマ区切りのティッカーシンボル文字列
+        tickers: カンマ区切りのティッカーシンボル文字列、またはそのリスト
         
     Returns:
         すべてのティッカーが有効かどうか
     """
-    if not tickers or not isinstance(tickers, str):
-        return False
-    
-    # カンマで分割して各ティッカーを検証
-    ticker_list = [t.strip() for t in tickers.split(',') if t.strip()]
+    ticker_list = _normalize_tickers(tickers)
     
     if not ticker_list:
         return False
@@ -41,21 +61,17 @@ def validate_tickers(tickers: str) -> bool:
     # すべてのティッカーが有効かチェック
     return all(validate_ticker(ticker) for ticker in ticker_list)
 
-def parse_tickers(tickers: str) -> List[str]:
+def parse_tickers(tickers: Union[str, List[str]]) -> List[str]:
     """
-    カンマ区切りのティッカー文字列をリストに変換
+    ティッカー入力をリストに変換
     
     Args:
-        tickers: カンマ区切りのティッカーシンボル文字列
+        tickers: カンマ区切りのティッカーシンボル文字列、またはそのリスト
         
     Returns:
         ティッカーシンボルのリスト
     """
-    if not tickers or not isinstance(tickers, str):
-        return []
-    
-    # カンマで分割して空白を除去し、大文字に変換
-    return [t.strip().upper() for t in tickers.split(',') if t.strip()]
+    return _normalize_tickers(tickers) or []
 
 def validate_price_range(min_price: Optional[Union[int, float, str]], max_price: Optional[Union[int, float, str]]) -> bool:
     """
